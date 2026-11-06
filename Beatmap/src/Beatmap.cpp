@@ -16,6 +16,19 @@ bool Beatmap::Load(BinaryStream& input, bool metadataOnly)
 
 bool Beatmap::Load(const Resource& resource, bool metadataOnly)
 {
+	// Native KSON dispatch handles ordinary disk charts and in-memory resources.
+	// KSH loading remains exactly as before.
+	if (resource.IsValid())
+	{
+		const String& name = resource.IsPath() ? resource.GetPath() : resource.GetName();
+		if (name.size() >= 5)
+		{
+			String extension = name.substr(name.size() - 5);
+			extension.ToLower();
+			if (extension == ".kson")
+				return m_ProcessKSON(resource, metadataOnly);
+		}
+	}
 	if (resource.IsPath())
 	{
 		File file;

@@ -895,7 +895,15 @@ public:
 		m_camera.pLaneTilt = m_playback.GetZoom(3);
 		m_track->centerSplit = m_playback.GetZoom(4);
 		m_camera.SetManualTilt(m_manualTiltEnabled);
-		m_camera.SetManualTiltInstant(m_playback.CheckIfManualTiltInstant());
+		// KSON manual tilt is an explicit graph value at the current pulse.
+		// Do not apply USC's secondary camera smoothing to the value;
+		// this is especially important for authored multi-turn tilt gimmicks.
+		// Keep the original smoothing behavior for KSH and automatic KSON tilt.
+		const bool directKsonManualTilt = m_manualTiltEnabled &&
+			m_chartPath.size() >= 5 &&
+			m_chartPath.substr(m_chartPath.size() - 5) == ".kson";
+		m_camera.SetManualTiltInstant(
+			directKsonManualTilt || m_playback.CheckIfManualTiltInstant());
 		m_camera.track = m_track;
 		m_camera.Tick(deltaTime,m_playback);
 		m_track->Tick(m_playback, deltaTime);

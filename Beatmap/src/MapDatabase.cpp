@@ -14,10 +14,55 @@
 #include <atomic>
 #include <iostream>
 #include <fstream>
+#include <cstdlib>
 #include <condition_variable>
 using std::thread;
 using std::mutex;
 using namespace std;
+
+// A same-stem ver=200 KSH can be a metadata-only KSON alias. Skip it only
+// when its body contains nothing beyond the expected empty placeholder row.
+// Never hide a real note-bearing KSH, even if its version is >= 200.
+static bool KSONHasCompanionStub(const String& kshPath)
+{
+    if (kshPath.size() < 4) return false;
+    const String ksonPath = kshPath.substr(0, kshPath.size() - 4) + ".kson";
+    if (!Path::FileExists(ksonPath)) return false;
+    std::ifstream input(*kshPath, std::ios::binary);
+    if (!input) return false;
+
+    bool inHeader = true;
+    bool version200 = false;
+    bool sawEmptyRow = false;
+    std::string line;
+    int count = 0;
+    while (count++ < 256 && std::getline(input, line))
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        if (inHeader)
+        {
+            if (line == "--") { inHeader = false; continue; }
+            if (line.compare(0, 4, "ver=") == 0)
+            {
+                const char* raw = line.c_str() + 4;
+                char* end = nullptr;
+                const long version = std::strtol(raw, &end, 10);
+                version200 = end != raw && version >= 200;
+            }
+            continue;
+        }
+        if (line == "--") continue;
+        if (line == "0000|00|--") { sawEmptyRow = true; continue; }
+        if (line.compare(0, 2, "//") == 0 || line[0] == '#'
+            || line.compare(0, 5, "beat=") == 0
+            || line.compare(0, 5, "tilt=") == 0)
+            continue;
+        // Any other body data might represent playable content.
+        return false;
+    }
+    return !inHeader && version200 && sawEmptyRow && input.eof();
+}
 
 class MapDatabase_Impl
 {
@@ -2035,14 +2080,20 @@ private:
 			m_outer.OnSearchStatusUpdated.Call("[START] Chart Database - Enumerate Files and Folders");
 			for(String rootSearchPath : m_searchPaths)
 			{
-				Vector<String> exts(3);
+				Vector<String> exts(4);
 				exts[0] = "ksh";
-				exts[1] = "chal";
-				exts[2] = "kco";
+				exts[1] = "kson";
+				exts[2] = "chal";
+				exts[3] = "kco";
 				Map<String, Vector<FileInfo>> files = Files::ScanFilesRecursive(rootSearchPath, exts, &m_interruptSearch);
 				if(m_interruptSearch)
 					return;
 				for(FileInfo& fi : files["ksh"])
+				{
+					if (KSONHasCompanionStub(fi.fullPath)) continue;
+					fileList.Add(fi.fullPath, fi);
+				}
+				for(FileInfo& fi : files["kson"])
 				{
 					fileList.Add(fi.fullPath, fi);
 				}
@@ -2126,9 +2177,9 @@ private:
 				Beatmap map;
 				if(fileStream.OpenRead(f.first))
 				{
-					FileReader reader(fileStream);
-
-					if(map.Load(reader, true))
+					// The resource path dispatches KSON to its JSON loader and KSH
+					// to its existing parser. Keep the open file for SHA-1 hashing.
+					if(map.Load(Resource::FromPath(f.first), true))
 					{
 						mapValid = true;
 					}

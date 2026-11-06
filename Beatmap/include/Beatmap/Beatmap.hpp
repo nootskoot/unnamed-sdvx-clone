@@ -177,6 +177,7 @@ public:
 
 private:
 	bool m_ProcessKShootMap(BinaryStream& input, bool metadataOnly);
+	bool m_ProcessKSON(const Resource& resource, bool metadataOnly);
 
 	Map<EffectType, AudioEffect> m_customAudioEffects;
 	Map<EffectType, AudioEffect> m_customAudioFilters;
