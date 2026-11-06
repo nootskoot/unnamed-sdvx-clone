@@ -2,6 +2,7 @@
 #include <Beatmap/Beatmap.hpp>
 #include <Beatmap/AudioEffects.hpp>
 #include <Audio/AudioStream.hpp>
+#include <map>
 
 /*
 	Audio effect with customized parameters
@@ -70,6 +71,9 @@ public:
 	// Set the mix value of the effect on lasers
 	void SetLaserEffectMix(float mix);
 	float GetLaserEffectMix() const;
+	// Independent named laser filter automation (not the normal laser filter).
+	void SetNamedLaserFilterMix(EffectType type, float mix);
+	void RefreshNamedLaserFilter(EffectType type);
 
 	// Toggle FX track or normal track
 	// this is just to support maps that do actually have an FX track
@@ -118,6 +122,13 @@ private:
 	class DSP *m_laserDSP = nullptr;
 	float m_laserEffectMix = 1.0f;
 	float m_laserInput = 0.0f;
+	struct NamedLaserFilterState
+	{
+		GameAudioEffect effect;
+		class DSP *dsp = nullptr;
+		float mix = 0.0f;
+	};
+	std::map<uint16, NamedLaserFilterState> m_namedLaserFilters;
 
 	GameAudioEffect m_buttonEffects[2];
 	class DSP *m_buttonDSPs[2] = {nullptr};

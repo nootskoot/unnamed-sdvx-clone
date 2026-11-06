@@ -12,6 +12,8 @@ AudioPlayback::AudioPlayback()
 }
 AudioPlayback::~AudioPlayback()
 {
+	for (auto &it : m_namedLaserFilters) m_CleanupDSP(it.second.dsp);
+	m_namedLaserFilters.clear();
 	m_CleanupDSP(m_buttonDSPs[0]);
 	m_CleanupDSP(m_buttonDSPs[1]);
 	m_CleanupDSP(m_laserDSP);
@@ -19,6 +21,8 @@ AudioPlayback::~AudioPlayback()
 bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chartSource, bool preRender)
 {
 	// Cleanup exising DSP's
+	for (auto &it : m_namedLaserFilters) m_CleanupDSP(it.second.dsp);
+	m_namedLaserFilters.clear();
 	m_currentHoldEffects[0] = nullptr;
 	m_currentHoldEffects[1] = nullptr;
 	m_CleanupDSP(m_buttonDSPs[0]);
@@ -329,6 +333,52 @@ void AudioPlayback::SetLaserEffectMix(float mix)
 float AudioPlayback::GetLaserEffectMix() const
 {
 	return m_laserEffectMix;
+}
+// Independent named filters are chained alongside the ordinary laser DSP.
+// The caller supplies an *explicit* mix. 0 disables and removes that DSP.
+void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
+{
+	// Pre-rendered or external FX tracks must not be modified in this path.
+	if (m_fxtrack || !m_music || !m_beatmap || !m_playback) return;
+	mix = Math::Clamp(mix, 0.0f, 1.0f);
+	const uint16 key = (uint16)type;
+	auto &state = m_namedLaserFilters[key];
+	state.mix = mix;
+	if (mix <= 0.0f)
+	{
+		m_CleanupDSP(state.dsp);
+		return;
+	}
+	if (state.dsp) { state.dsp->mix = mix; return; }
+	state.effect = m_beatmap->GetFilter(type);
+	// An uninitialized biquad can silence the output; until we implement
+	// independent coefficient updates, do not create BQF named filters.
+	if (state.effect.type == EffectType::None ||
+		state.effect.type == EffectType::PeakingFilter ||
+		state.effect.type == EffectType::LowPassFilter ||
+		state.effect.type == EffectType::HighPassFilter ||
+		state.effect.type == EffectType::SwitchAudio) return;
+	Ref<AudioStream> track = m_GetDSPTrack();
+	state.dsp = state.effect.CreateDSP(m_playback->GetCurrentTimingPoint(),
+		1.0f, track->GetAudioSampleRate(), GetPlaybackSpeed());
+	if (!state.dsp) return;
+	state.dsp->startTime = track->GetPosition();
+	state.dsp->chartOffset = m_beatmap->GetMapSettings().offset;
+	state.dsp->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
+	state.dsp->mix = mix;
+	track->AddDSP(state.dsp);
+}
+void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
+{
+	const uint16 key = (uint16)type;
+	auto it = m_namedLaserFilters.find(key);
+	if (it == m_namedLaserFilters.end() || !it->second.dsp) return;
+	if (it->second.effect.type != EffectType::Retrigger) return;
+	// Approximate updateTrigger: rebuilding refreshes the repeat source.
+	// This is not an exact KSM resampling implementation.
+	float mix = it->second.mix;
+	m_CleanupDSP(it->second.dsp);
+	SetNamedLaserFilterMix(type, mix);
 }
 Ref<AudioStream> AudioPlayback::m_GetDSPTrack()
 {

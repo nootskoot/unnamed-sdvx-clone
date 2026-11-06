@@ -155,6 +155,7 @@ private:
 	float m_slamVolume = 1.0;
 
 	Sample m_slamSample;
+	uint8 m_nextSlamSound = 0; // Chart one-shot sound variant; 3 = mute.
 	Sample m_clickSamples[2];
 	Sample* m_fxSamples = nullptr;
 
@@ -2152,7 +2153,9 @@ public:
 		float slamSize = object->points[1] - object->points[0];
 		float direction = Math::Sign(slamSize);
 		m_camera.AddCameraShake(slamSize);
-		m_slamSample->Play();
+		if (m_nextSlamSound != 3)
+			m_slamSample->Play();
+		m_nextSlamSound = 0; // chokkakuse only applies to the next slam.
 
 		if (object->spin.type != 0)
 		{
@@ -2405,6 +2408,20 @@ public:
 		else if(key == EventKey::LaserEffectMix)
 		{
 			m_audioPlayback.SetLaserEffectMix(data.floatVal);
+		}
+		else if (key == EventKey::NamedLaserFilterMix)
+		{
+			const EffectType type = (EffectType)(uint16)(data.uintVal >> 16);
+			m_audioPlayback.SetNamedLaserFilterMix(type, (float)(data.uintVal & 0xFFFF) / 1000.0f);
+		}
+		else if (key == EventKey::NamedLaserFilterRefresh)
+		{
+			if (data.uintVal)
+				m_audioPlayback.RefreshNamedLaserFilter((EffectType)(uint16)data.uintVal);
+		}
+		else if (key == EventKey::LaserSlamSound)
+		{
+			m_nextSlamSound = data.byteVal;
 		}
 		else if(key == EventKey::TrackRollBehaviour)
 		{

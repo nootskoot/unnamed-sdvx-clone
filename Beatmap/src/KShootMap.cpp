@@ -235,12 +235,17 @@ bool KShootMap::Init(BinaryStream& input, bool metadataOnly)
 	KShootTime time = KShootTime(0, 0);
 	while(TextStream::ReadLine(input, line, lineEnding))
 	{
+		lineNumber++;
 		if(line.empty())
 		{
 			continue;
 		}
 
-		lineNumber++;
+		// KSH annotations (e.g. "--//end") are not note rows.
+		// Do not turn them into additional measures.
+		if (line.substr(0, 4) == "--//")
+			continue;
+
 		if(line == c_sep)
 		{
 			// End this block
@@ -345,6 +350,13 @@ bool KShootMap::Init(BinaryStream& input, bool metadataOnly)
 		}
 	}
 
+	// KSH requires a final "--", but retain a pending note bar at EOF.
+	// Do not append a blank measure for trailing #define_ statements.
+	if (!block.ticks.empty())
+	{
+		Log("[KSH]Missing final bar line; retaining last measure", Logger::Severity::Warning);
+		blocks.push_back(block);
+	}
 	return true;
 }
 bool KShootMap::GetBlock(const KShootTime& time, KShootBlock*& tickOut)

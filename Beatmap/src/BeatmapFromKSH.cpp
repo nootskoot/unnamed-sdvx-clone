@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Beatmap.hpp"
 #include "KShootMap.hpp"
+#include <cmath> // std::isfinite for malformed KSH tempo protection
 
 // Temporary object to keep track if a button is a hold button
 struct TempButtonState
@@ -127,6 +128,7 @@ struct MultiParamRange
 	MultiParamRange(const MultiParam &a)
 	{
 		params[0] = a;
+		params[1] = a;
 	}
 	MultiParamRange(const MultiParam &a, const MultiParam &b)
 	{
@@ -339,7 +341,9 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 		AssignFloatIfSet(effect.pitchshift.amount, "pitch");
 		break;
 	case EffectType::Bitcrush:
+		// Both legacy "amount" and the documented KSH "reduction" key.
 		AssignSamplesIfSet(effect.bitcrusher.reduction, "amount");
+		AssignSamplesIfSet(effect.bitcrusher.reduction, "reduction");
 		break;
 	case EffectType::Echo:
 		AssignDurationIfSet(effect.duration, "waveLength");
@@ -561,7 +565,17 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 		}
 	}
 
-	const static int tickResolution = 240;
+		// KSH ver < 120 (including omitted ver) uses 60% of mvol.
+	// ver_compat controls legacy playback semantics when present.
+	const String* formatVersion = kshootMap.settings.Find("ver");
+	const String* compatVersion = kshootMap.settings.Find("ver_compat");
+	const String* behaviorVersion = (compatVersion && !compatVersion->empty()) ? compatVersion : formatVersion;
+	const int behaviorVersionNumber = (behaviorVersion && !behaviorVersion->empty())
+		? atoi(behaviorVersion->data()) : 100;
+	if (behaviorVersionNumber < 120)
+		m_settings.musicVolume *= 0.6f;
+
+const static int tickResolution = 240;
 
 	const TimingPoint* currTimingPoint = nullptr;
 
@@ -595,11 +609,55 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 		TimingPoint firstTimingPoint;
 		firstTimingPoint.numerator = 4;
 		firstTimingPoint.denominator = 4;
+		// Header beat= is legal in KSH, not only body beat= events.
+		if (const String* headerBeat = kshootMap.settings.Find("beat"))
+		{
+			String numeratorText, denominatorText;
+			if (headerBeat->Split("/", &numeratorText, &denominatorText))
+			{
+				const long numerator = atol(*numeratorText);
+				const long denominator = atol(*denominatorText);
+				if (numerator > 0 && denominator > 0)
+				{
+					firstTimingPoint.numerator = (uint32)numerator;
+					firstTimingPoint.denominator = (uint32)denominator;
+				}
+				else
+					Logf("[KSH]Ignoring invalid header beat: %s", Logger::Severity::Warning, *headerBeat);
+			}
+			else
+				Logf("[KSH]Ignoring invalid header beat: %s", Logger::Severity::Warning, *headerBeat);
+		}
 
 		firstTimingPoint.time = atol(*kshootMap.settings["o"]);
 		refTimingPointTime = static_cast<double>(firstTimingPoint.time);
 
-		const double bpm = atof(*kshootMap.settings["t"]);
+		double bpm = atof(*kshootMap.settings["t"]);
+		if (!(bpm > 0.0))
+		{
+			// Some KSH charts use a display-only header t=--- and put
+			// the real starting tempo on the very first note tick.
+			// Only a tick-zero tempo can safely override the initial BPM.
+			if (!kshootMap.blocks.empty() && !kshootMap.blocks[0].ticks.empty())
+			{
+				for (const auto& setting : kshootMap.blocks[0].ticks[0].settings)
+				{
+					if (setting.first == "t")
+					{
+						const double candidate = atof(*setting.second);
+						if (candidate > 0.0)
+						{
+							bpm = candidate;
+							break;
+						}
+					}
+				}
+			}
+			// Match KSM v1's missing-tempo fallback if the chart never
+			// supplies a valid tempo at the start.
+			if (!(bpm > 0.0))
+				bpm = 120.0;
+		}
 		firstTimingPoint.beatDuration = 60000.0 / bpm;
 
 		currTimingPoint = &(m_timingPoints.Add(std::move(firstTimingPoint)));
@@ -626,7 +684,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 
 	EffectType currentButtonEffectTypes[2] = {EffectType::None};
 	// 2 per button
-	int16 currentButtonEffectParams[4] = {-1};
+	int16 currentButtonEffectParams[4] = {-1, -1, -1, -1};
 	const uint32 maxEffectParamsPerButtons = 2;
 	float laserRanges[2] = {1.0f, 1.0f};
 	MapTime lastLaserPointTime[2] = {0, 0};
@@ -736,18 +794,28 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 			if (p.first == "beat")
 			{
 				String n, d;
-				if (!p.second.Split("/", &n, &d))
-					assert(false);
-
-				uint32 num = atol(*n);
-				uint32 denom = atol(*d);
-
-				AddTimingPoint(currTimingPoint->beatDuration, num, denom, currTimingPoint->tickrateOffset);
+				// Malformed beat=/0 previously hit assert(false) or could corrupt timing.
+				if (!p.second.Split("/", &n, &d) ||
+					atol(*n) <= 0 || atol(*d) <= 0)
+				{
+					Logf("[KSH]Ignoring invalid beat at %d:%d: %s", Logger::Severity::Warning,
+						it.GetTime().block, it.GetTime().tick, p.second);
+				}
+				else
+				{
+					const uint32 num = (uint32)atol(*n);
+					const uint32 denom = (uint32)atol(*d);
+					AddTimingPoint(currTimingPoint->beatDuration, num, denom, currTimingPoint->tickrateOffset);
+				}
 			}
 			else if (p.first == "t")
 			{
 				const double bpm = atof(*p.second);
-				AddTimingPoint(60000.0 / bpm, currTimingPoint->numerator, currTimingPoint->denominator, currTimingPoint->tickrateOffset);
+				if (bpm > 0.0 && std::isfinite(bpm))
+					AddTimingPoint(60000.0 / bpm, currTimingPoint->numerator, currTimingPoint->denominator, currTimingPoint->tickrateOffset);
+				else
+					Logf("[KSH]Ignoring invalid BPM at %d:%d: %s", Logger::Severity::Warning,
+						it.GetTime().block, it.GetTime().tick, p.second);
 			}
 			else if (p.first == "tickrate_offset")
 			{
@@ -792,6 +860,56 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 				evt->data.effectVal = ParseFilterType(p.second);
 				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
 			}
+			// KSH: independent automation for named #define_filter DSPs.
+			else if (p.first.find("filter:") == 0)
+			{
+				String name, property;
+				const String filterOption = p.first.substr(7);
+				if (filterOption.Split(":", &name, &property))
+				{
+					const EffectType *type = filterTypeMap.FindEffectType(name);
+					if (type && m_customAudioFilters.Contains(*type) &&
+						(property == "mix" || property == "updateTrigger"))
+					{
+						EventObjectState *evt = new EventObjectState();
+						evt->interTickIndex = tickSettingIndex;
+						evt->time = mapTime;
+						if (property == "mix")
+						{
+							// Input is a percentage, e.g. 90% or 0%.
+							float percentage = (float)atof(p.second.data());
+							percentage = Math::Clamp(percentage, 0.0f, 100.0f);
+							const uint32 permille = (uint32)(percentage * 10.0f + 0.5f);
+							evt->key = EventKey::NamedLaserFilterMix;
+							evt->data.uintVal = ((uint32)(uint16)*type << 16) | permille;
+						}
+						else
+						{
+							evt->key = EventKey::NamedLaserFilterRefresh;
+							// 'on' is a one-shot repeat-source refresh, not a persistent toggle.
+							evt->data.uintVal = p.second == "on" ? (uint32)(uint16)*type : 0;
+						}
+						m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
+					}
+					else
+						Logf("[KSH]Unsupported named filter option: %s", Logger::Severity::Warning, p.first);
+				}
+			}
+			else if (p.first == "chokkakuse")
+			{
+				uint8 sound = 0;
+				if (p.second == "down") sound = 1;
+				else if (p.second == "swing") sound = 2;
+				else if (p.second == "mute") sound = 3;
+				else if (p.second != "up")
+					Logf("[KSH]Unknown chokkakuse: %s", Logger::Severity::Warning, p.second);
+				EventObjectState *evt = new EventObjectState();
+				evt->interTickIndex = tickSettingIndex;
+				evt->time = mapTime;
+				evt->key = EventKey::LaserSlamSound;
+				evt->data.byteVal = sound;
+				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
+			}
 			else if (p.first == "pfiltergain")
 			{
 				// Inser filter type change event
@@ -809,7 +927,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 				EventObjectState* evt = new EventObjectState();
 				evt->interTickIndex = tickSettingIndex;
 				evt->time = mapTime;
-				evt->key = EventKey::LaserEffectMix;
+				evt->key = EventKey::SlamVolume;
 				evt->data.floatVal = vol;
 				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
 			}
@@ -860,6 +978,9 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 				evt->data.rollVal = TrackRollBehaviour::Zero;
 
 				String v = p.second;
+				// KSM v1 spellings of existing USC tilt modes.
+				if (v == "big") v = "bigger";
+				else if (v == "keep") v = "keep_bigger";
 				size_t f = v.find("keep_");
 				if (f != -1)
 				{
@@ -1028,7 +1149,8 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 				if (i >= 4)
 				{
 					// Unset effect parameters
-					currentButtonEffectParams[i - 4] = -1;
+					currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons] = -1;
+					currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons + 1] = -1;
 				}
 			}
 			else if (!state)
@@ -1054,8 +1176,8 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 					if (c == 'B')
 					{
 						state->effectType = EffectType::Bitcrush;
-						if (currentButtonEffectParams[i - 4] != -1)
-							state->effectParams[0] = currentButtonEffectParams[i - 4];
+						if (currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons] != -1)
+							state->effectParams[0] = currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons];
 						else
 							state->effectParams[0] = 5;
 					}
@@ -1072,6 +1194,13 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 						int16 paramMap[] = {
 							8, 16, 32, 12, 24};
 						state->effectParams[0] = paramMap[c - 'S'];
+					}
+					else if (c == 'P')
+					{
+						state->effectType = EffectType::PitchShift;
+						const uint32 paramOffset = (i - 4) * maxEffectParamsPerButtons;
+						state->effectParams[0] = currentButtonEffectParams[paramOffset] != -1
+							? currentButtonEffectParams[paramOffset] : 12;
 					}
 					else if (c == 'Q')
 					{
@@ -1094,7 +1223,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 					else if (c == 'A')
 					{
 						state->effectType = EffectType::TapeStop;
-						if (currentButtonEffectParams[i - 4] != -1)
+						if (currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons] != -1)
 							memcpy(state->effectParams, currentButtonEffectParams + (i - 4) * maxEffectParamsPerButtons,
 								   sizeof(state->effectParams));
 						else

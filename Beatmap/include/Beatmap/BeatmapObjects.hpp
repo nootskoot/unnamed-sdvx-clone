@@ -64,7 +64,10 @@ enum class EventKey : uint8
 	LaserEffectType,	// Effect
 	LaserEffectMix,		// Float
 	TrackRollBehaviour, // (uint8,Float)
-	ChartEnd,
+	ChartEnd,	NamedLaserFilterMix,     // packed: EffectType + mix in per-mille
+	NamedLaserFilterRefresh, // EffectType: retrigger refresh
+	LaserSlamSound,          // uint8: 0=up, 1=down, 2=swing, 3=mute
+
 };
 
 enum class TrackRollBehaviour : uint8
