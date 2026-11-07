@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Beatmap.hpp"
 #include "KShootMap.hpp"
+#include "KSH2Bridge.hpp"
 #include <cmath> // std::isfinite for malformed KSH tempo protection
 
 // Temporary object to keep track if a button is a hold button
@@ -402,6 +403,41 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 
 bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 {
+    // Probe the ASCII header only. Syntax routing follows ver, not ver_compat.
+    const auto start = input.Tell();
+    std::string line;
+    bool nativeKSH = false;
+    for (size_t i = 0; i < 1024 * 1024 && input.Tell() < input.GetSize(); ++i) {
+        char c;
+        if (input.Serialize(&c, 1) != 1) break;
+        if (c != '\n') { line += c; continue; }
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
+        const auto first = line.find_first_not_of(" \t");
+        if (first == std::string::npos) line.clear();
+        else line = line.substr(first, line.find_last_not_of(" \t") - first + 1);
+        if (line == "--") break;
+        if (line.compare(0, 4, "ver=") == 0)
+            nativeKSH = std::strtol(line.c_str() + 4, nullptr, 10) >= 200;
+        line.clear();
+    }
+    input.Seek(start);
+    if (nativeKSH) {
+        const size_t size = input.GetSize() - start;
+        if (size > 32 * 1024 * 1024) {
+            Log("KSH v2 chart exceeds the 32 MiB import limit", Logger::Severity::Warning);
+            return false;
+        }
+        std::string source(size, '\0');
+        if (input.Serialize(source.data(), size) != size) return false;
+        std::string json, diagnostics;
+        const bool converted = ConvertKSH2(source, json, diagnostics);
+        if (!diagnostics.empty()) Logf("KSH v2: %s", Logger::Severity::Warning, diagnostics.c_str());
+        if (!converted) return false;
+        auto bytes = std::make_shared<Buffer>(json.begin(), json.end());
+        return m_ProcessKSON(Resource::FromBytes("converted.kson", bytes), metadataOnly);
+    }
+
 	KShootMap kshootMap;
 	if (!kshootMap.Init(input, metadataOnly))
 		return false;
@@ -470,6 +506,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 	// Process map settings
 	m_settings.previewOffset = 0;
 	m_settings.previewDuration = 0;
+	m_settings.slamVolume = 0.5f; // KSH default chokkakuvol=50
 	for (auto &s : kshootMap.settings)
 	{
 		if (s.first == "title")
@@ -966,8 +1003,9 @@ const static int tickResolution = 240;
 			}
 			else if (p.first == "center_split")
 			{
-				const double value = atol(*p.second) / 100.0;
-				m_centerSplit.Insert(mapTime, value);
+				const double value = std::strtod(p.second.data(), nullptr);
+                if (std::isfinite(value) && std::abs(value) <= 65535.0)
+                    m_centerSplit.Insert(mapTime, value / 100.0);
 			}
 			else if (p.first == "tilt")
 			{

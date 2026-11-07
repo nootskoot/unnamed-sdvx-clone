@@ -4,115 +4,183 @@ layout(location=1) in vec2 texVp;
 layout(location=0) out vec4 target;
 
 uniform ivec2 screenCenter;
-// x = bar time
-// y = off-sync but smooth bpm based timing
-// z = real time since song start
 uniform vec3 timing;
 uniform ivec2 viewport;
-uniform float objectGlow;
-// bg_texture.png
-uniform sampler2D mainTex;
 uniform vec2 tilt;
 uniform float clearTransition;
 
 #define PI 3.14159265359
 #define TWO_PI 6.28318530718
 
-vec3 hsv2rgb(vec3 c) {
-  vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+uniform vec3 col_default = vec3(0.0, 0.2, 1.0);
+uniform vec3 col_clear = vec3(0.2, 0.0, 1.0);
+
+vec2 rotate_point(vec2 cen, float angle, vec2 p) {
+    float s = sin(angle);
+    float c = cos(angle);
+    p -= cen;
+    p = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+    p += cen;
+    return p;
 }
 
-vec2 rotate_point(vec2 cen,float angle,vec2 p)
+float sun(vec2 uv, float battery)
 {
-  float s = sin(angle);
-  float c = cos(angle);
-
-  // translate point back to origin:
-  p.x -= cen.x;
-  p.y -= cen.y;
-
-  // rotate point
-  float xnew = p.x * c - p.y * s;
-  float ynew = p.x * s + p.y * c;
-
-  // translate point back:
-  p.x = xnew + cen.x;
-  p.y = ynew + cen.y;
-  return p;
+    float val = smoothstep(0.3, 0.29, length(uv));
+    float bloom = smoothstep(0.7, 0.0, length(uv));
+    float cut = 3.0 * sin((uv.y + timing.z * 0.2 * (battery + 0.02)) * 100.0) 
+                + clamp(uv.y * 14.0 + 1.0, -6.0, 6.0);
+    cut = clamp(cut, 0.0, 1.0);
+    return clamp(val * cut, 0.0, 1.0) + bloom * 0.6;
 }
 
-
-// Reference to
-// http://thndl.com/square-shaped-shaders.html
-// https://thebookofshaders.com/07/
-
-float GetDistanceShape(vec2 st, int N){
-    vec3 color = vec3(0.0);
-    float d = 0.0;
-
-    // Angle and radius from the current pixel
-    float a = atan(st.x,st.y)+PI;
-    float r = TWO_PI/float(N);
-
-    // Shaping function that modulate the distance
-    d = cos(floor(.5+a/r)*r-a)*length(st);
-
-    return d;
-
-}
-
-
-  // Number of sides of your shape
-  int N = 4;
-
-  // "Stretch" | lower = "Stretchier"
-  float Stretch = .3; 
-
-  // Speed
-  float speed = 1;
-
-  // Default rotation in radians
-  float BaseRotation = 0.0;
-
-  // Rotation of texture for alignment, in radians
-  float BaseTexRotation = 0.0;
-  
-  // Scale
-  vec2 Scale = vec2(1.0, 0.6);
-
-void main()
+float grid(vec2 uv, float battery)
 {
+    vec2 size = vec2(uv.y, uv.y * uv.y * 0.2) * 0.01;
+    uv.y += timing.z * 4.0 * (battery + 0.05);
+    uv = abs(fract(uv) - 0.5);
+    vec2 lines = smoothstep(size, vec2(0.0), uv);
+    lines += smoothstep(size * 5.0, vec2(0.0), uv) * 0.4 * battery;
+    return clamp(lines.x + lines.y, 0.0, 3.0);
+}
+
+
+float dot2(in vec2 v ) { return dot(v,v); }
+
+float sdTrapezoid( in vec2 p, in float r1, float r2, float he )
+{
+    vec2 k1 = vec2(r2,he);
+    vec2 k2 = vec2(r2-r1,2.0*he);
+    p.x = abs(p.x);
+    vec2 ca = vec2(p.x-min(p.x,(p.y<0.0)?r1:r2), abs(p.y)-he);
+    vec2 cb = p - k1 + k2*clamp( dot(k1-p,k2)/dot2(k2), 0.0, 1.0 );
+    float s = (cb.x<0.0 && ca.y<0.0) ? -1.0 : 1.0;
+    return s*sqrt( min(dot2(ca),dot2(cb)) );
+}
+
+float sdLine( in vec2 p, in vec2 a, in vec2 b )
+{
+    vec2 pa = p-a, ba = b-a;
+    float h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+    return length( pa - ba*h );
+}
+
+float sdBox( in vec2 p, in vec2 b )
+{
+    vec2 d = abs(p)-b;
+    return length(max(d,vec2(0))) + min(max(d.x,d.y),0.0);
+}
+
+float opSmoothUnion(float d1, float d2, float k){
+    float h = clamp(0.5 + 0.5 * (d2 - d1) /k,0.0,1.0);
+    return mix(d2, d1 , h) - k * h * ( 1.0 - h);
+}
+
+float sdCloud(in vec2 p, in vec2 a1, in vec2 b1, in vec2 a2, in vec2 b2, float w)
+{
+    float lineVal1 = sdLine(p, a1, b1);
+    float lineVal2 = sdLine(p, a2, b2);
+    vec2 ww = vec2(w*1.5, 0.0);
+    vec2 left = max(a1 + ww, a2 + ww);
+    vec2 right = min(b1 - ww, b2 - ww);
+    vec2 boxCenter = (left + right) * 0.5;
+    float boxH = abs(a2.y - a1.y) * 0.5;
+    float boxVal = sdBox(p - boxCenter, vec2(0.04, boxH)) + w;
+    
+    float uniVal1 = opSmoothUnion(lineVal1, boxVal, 0.05);
+    float uniVal2 = opSmoothUnion(lineVal2, boxVal, 0.05);
+    
+    return min(uniVal1, uniVal2);
+}
+
+float smoothstep_custom(float edge0, float edge1, float x) {
+    float t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+void main() {
     float ar = float(viewport.x) / viewport.y;
-    
-	vec2 uv = vec2(texVp.x / viewport.x, texVp.y / viewport.y);
+    vec2 uv = vec2(texVp.x / viewport.x, texVp.y / viewport.y) * ar;
+    vec2 center = vec2(screenCenter) / vec2(viewport) * ar;
+
     uv.x *= ar;
-    
-    vec2 center = vec2(screenCenter) / vec2(viewport);
-    center.x *= ar;
-    
-    vec2 point = uv;
-	float bgrot =  dot(tilt, vec2(0.5, 1.0));
-    point = rotate_point(center, BaseRotation + (bgrot * TWO_PI), point);
-    vec2 point_diff = center - point;
-    point_diff /= Scale;
-    float diff = GetDistanceShape(point_diff,N);
-    float thing2 = Stretch / (diff);
-	float fog = -1. / (diff * 10. * Scale.x) + 1.;
-    fog = clamp(fog, 0, 1);
-    float texY = thing2;
-    texY += timing.y * speed;
+    uv.x = uv.x - 0.75;
 
-    
-    float rot = (atan(point_diff.x,point_diff.y) + BaseTexRotation) / TWO_PI;
+    uv = uv - center;
+    uv.y = 1.0 - uv.y - 0.5;  // Flip the y-coordinate
 
-    vec4 col = texture(mainTex, vec2(rot,texY));
-    float hsvVal = (col.x + col.y + col.z) / 3.0;
-    vec4 clear_col = vec4(hsv2rgb(vec3(cos(rot * 10) + 0.4, 1.0, hsvVal)), col.a);
+    float rotationAngle = -dot(tilt, vec2(0.5, 1.0)) * TWO_PI;
+    uv = rotate_point(center, rotationAngle, uv);
 
-    col.xyz *= (1.0 - clearTransition);
-    col.xyz += clear_col.xyz * clearTransition * 2;
-    target.xyz = col.xyz;
-    target.a = col.a * fog;
+    float battery = 1.0;
+    float desaturation = smoothstep_custom(0.7, 1.0, clearTransition-0.125);
+
+    // Grid
+    float fog = smoothstep(0.1, -0.02, abs(uv.y + 0.2));
+    vec3 col = vec3(0.0, 0.1, 0.2);
+    if (uv.y < -0.2)
+    {
+        uv.y = 3.0 / (abs(uv.y + 0.2) + 0.05);
+        uv.x *= uv.y * 1.0;
+        float gridVal = grid(uv, battery);
+        col = mix(col, vec3(1.0, 0.5, 1.0), gridVal);
+    }
+    else
+    {
+        float fujiD = min(uv.y * 4.5 - 0.5, 1.0);
+        uv.y -= battery * 1.1 - 0.51;
+
+        vec2 sunUV = uv;
+        vec2 fujiUV = uv;
+
+        // Sun
+        sunUV += vec2(0.75, 0.2);
+        col = vec3(1.0, 0.2, 1.0);
+        float sunVal = sun(sunUV, battery);
+
+        col = mix(col, vec3(1.0, 0.4, 0.1), sunUV.y * 2.0 + 0.2);
+        col = mix(vec3(0.8, 0.8, 0.8) * desaturation, col, sunVal);
+
+        // fuji
+        float fujiVal = sdTrapezoid( uv  + vec2(-0.75+sunUV.y * 0.0, 0.5), 1.75 + pow(uv.y * uv.y, 2.1), 0.2, 0.5);
+        float waveVal = uv.y + sin(uv.x * 20.0 + timing.z * 2.0) * 0.05 + 0.2;
+        float wave_width = smoothstep(0.0,0.01,(waveVal));
+
+        // fuji color
+        col = mix( col, mix(vec3(0.0, 0.0, 0.25), vec3(1.0, 0.0, 0.5), fujiD), step(fujiVal, 0.0));
+        // fuji top snow
+        col = mix( col, vec3(1.0, 0.5, 1.0), wave_width * step(fujiVal, 0.0));
+        // fuji outline
+        col = mix( col, vec3(1.0, 0.5, 1.0), 1.0-smoothstep(0.0,0.01,abs(fujiVal)) );
+        
+        // horizon color
+        col += mix( col, mix(vec3(1.0, 0.12, 0.8), vec3(0.0, 0.0, 0.2), clamp(uv.y * 3.5 + 3.0, 0.0, 1.0)), step(0.0, fujiVal) );
+        
+        // cloud
+        vec2 cloudUV = uv;
+        cloudUV.x = mod(cloudUV.x + timing.z * 0.1, 4.0) - 2.0;
+        float cloudTime = timing.z * 0.5;
+        float cloudY = -0.5;
+        float cloudVal1 = sdCloud(cloudUV, 
+                                 vec2(0.1 + sin(cloudTime + 140.5)*0.1,cloudY), 
+                                 vec2(1.05 + cos(cloudTime * 0.9 - 36.56) * 0.1, cloudY), 
+                                 vec2(0.2 + cos(cloudTime * 0.867 + 387.165) * 0.1,0.25+cloudY), 
+                                 vec2(0.5 + cos(cloudTime * 0.9675 - 15.162) * 0.09, 0.25+cloudY), 0.075);
+        cloudY = -0.6;
+        float cloudVal2 = sdCloud(cloudUV, 
+                                 vec2(-0.9 + cos(cloudTime * 1.02 + 541.75) * 0.1,cloudY), 
+                                 vec2(-0.5 + sin(cloudTime * 0.9 - 316.56) * 0.1, cloudY), 
+                                 vec2(-1.5 + cos(cloudTime * 0.867 + 37.165) * 0.1,0.25+cloudY), 
+                                 vec2(-0.6 + sin(cloudTime * 0.9675 + 665.162) * 0.09, 0.25+cloudY), 0.075);
+        
+        float cloudVal = min(cloudVal1, cloudVal2);
+
+        col = mix(col, vec3(0.0, 0.0, 0.2), 1.0 - smoothstep(0.075 - 0.0001, 0.075, cloudVal));
+        col += vec3(1.0, 1.0, 1.0)*(1.0 - smoothstep(0.0,0.01,abs(cloudVal - 0.075)));
+    }
+
+    col += fog * fog * fog;
+    col = mix(vec3(col.r, col.r, col.r) * 0.5, col, battery);
+
+    target = vec4(col,2.0);
 }
