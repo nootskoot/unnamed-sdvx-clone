@@ -12,6 +12,7 @@ public:
 		ZOOM_TOP,
 		SHIFT_X,
 		ROTATION_Z,
+		KSON_ROTATION_DEG,
 		SCROLL_SPEED,
 	};
 
@@ -23,6 +24,7 @@ public:
 		case GraphType::ZOOM_TOP: return m_zoomTop;
 		case GraphType::SHIFT_X: return m_shiftX;
 		case GraphType::ROTATION_Z: return m_rotationZ;
+		case GraphType::KSON_ROTATION_DEG: return m_ksonRotationDeg;
 		case GraphType::SCROLL_SPEED: return m_scrollSpeed;
 
 			// Shouldn't happen at all.
@@ -38,6 +40,7 @@ public:
 		case GraphType::ZOOM_TOP: return m_zoomTop;
 		case GraphType::SHIFT_X: return m_shiftX;
 		case GraphType::ROTATION_Z: return m_rotationZ;
+		case GraphType::KSON_ROTATION_DEG: return m_ksonRotationDeg;
 		case GraphType::SCROLL_SPEED: return m_scrollSpeed;
 
 			// Shouldn't happen at all.
@@ -56,6 +59,7 @@ private:
 	LineGraph m_shiftX; /// former zoom_side
 
 	LineGraph m_rotationZ; /// former manual tilt
+	LineGraph m_ksonRotationDeg; // degrees; independent from manual tilt
 
 	LineGraph m_scrollSpeed = LineGraph{1.0};
 };

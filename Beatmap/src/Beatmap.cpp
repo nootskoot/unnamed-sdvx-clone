@@ -374,6 +374,8 @@ float Beatmap::GetBeatCount(MapTime start, MapTime end, TimingPointsIterator hin
 
 float Beatmap::GetBeatCountWithScrollSpeedApplied(MapTime start, MapTime end, TimingPointsIterator hint) const
 {
+    if (m_ksonScroll)
+        return float(m_ksonScroll->Position(end) - m_ksonScroll->Position(start));
 	int sign = 1;
 
 	if (m_timingPoints.empty() || start == end)
@@ -591,6 +593,7 @@ float Beatmap::GetCenterSplitValueAt(MapTime mapTime) const
 
 float Beatmap::GetScrollSpeedAt(MapTime mapTime) const
 {
+    if (m_ksonScroll) return float(m_ksonScroll->Speed(mapTime));
 	return static_cast<float>(m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED).ValueAt(mapTime));
 }
 

@@ -683,6 +683,7 @@ public:
 		m_camera.pLanePitch = m_playback.GetZoom(1);
 		m_camera.pLaneOffset = m_playback.GetZoom(2);
 		m_camera.pLaneTilt = m_playback.GetZoom(3);
+		m_camera.pKSONRotationDegrees = m_playback.GetZoom(5);
 		m_track->centerSplit = m_playback.GetZoom(4);
 
 		for(uint32 i = 0; i < 2; i++)
@@ -893,6 +894,7 @@ public:
 		m_camera.pLanePitch = m_playback.GetZoom(1);
 		m_camera.pLaneOffset = m_playback.GetZoom(2);
 		m_camera.pLaneTilt = m_playback.GetZoom(3);
+		m_camera.pKSONRotationDegrees = m_playback.GetZoom(5);
 		m_track->centerSplit = m_playback.GetZoom(4);
 		m_camera.SetManualTilt(m_manualTiltEnabled);
 		// KSON manual tilt is an explicit graph value at the current pulse.
@@ -1376,6 +1378,7 @@ public:
 		m_camera.pLanePitch = m_playback.GetZoom(1);
 		m_camera.pLaneOffset = m_playback.GetZoom(2);
 		m_camera.pLaneTilt = m_playback.GetZoom(3);
+		m_camera.pKSONRotationDegrees = m_playback.GetZoom(5);
 		
 		// Enable laser slams and roll ignore behaviour
 		m_camera.SetFancyHighwayTilt(g_gameConfig.GetBool(GameConfigKeys::EnableFancyHighwayRoll));

@@ -6,6 +6,119 @@
 #include "LaserTrackBuilder.hpp"
 #include "AsyncAssetLoader.hpp"
 #include <unordered_set>
+#include <algorithm>
+#include <cmath>
+
+// KSON_STAGE8_EXTREME_HOLD: render very fast scroll teleport holds as bounded
+// pieces instead of stretching one rectangle over hundreds of beats.
+// Deliberately *not* used for ordinary hold notes or laser geometry.
+namespace {
+constexpr double kKSONHoldTeleportSpeed = 4096.0;
+constexpr MapTime kKSONHoldSamplingMs = 8;
+
+bool KSONHoldOverlapsTeleport(const LineGraph& scroll, MapTime begin, MapTime end)
+{
+    if (end <= begin)
+        return false;
+    // For a point before the hold, only its *after* value is active.
+    // Its *before* value may have been an earlier one-millisecond teleport.
+    auto prev = scroll.upper_bound(begin);
+    if (prev != scroll.begin())
+    {
+        --prev;
+        const double speed = prev->second.value.second;
+        if (!std::isfinite(speed) || std::abs(speed) > kKSONHoldTeleportSpeed)
+            return true;
+    }
+    for (auto it = scroll.lower_bound(begin); it != scroll.end() && it->first < end; ++it)
+    {
+        const auto& v = it->second.value;
+        // When a hold starts exactly on a speed node, its pre-node
+        // value is already in the past. Only the after-value applies.
+        if (!std::isfinite(v.second) ||
+            std::abs(v.second) > kKSONHoldTeleportSpeed ||
+            (it->first > begin &&
+             (!std::isfinite(v.first) || std::abs(v.first) > kKSONHoldTeleportSpeed)))
+            return true;
+    }
+    return false;
+}
+
+// Callback receives signed-view-distance endpoints in *beats*, not pixels.
+// Slice at every authored scroll node so even one-millisecond warps cannot be
+// hidden inside a coarse sample. Merge contiguous visible runs only when their
+// motion direction agrees. Never connect across a skipped teleport.
+template <typename SampleDistance, typename DrawPiece>
+void KSONDrawProjectedHold(const LineGraph& scroll, MapTime begin, MapTime end,
+                           double viewRange, SampleDistance distance, DrawPiece drawPiece)
+{
+    if (end <= begin || !(viewRange > 0.0) || !std::isfinite(viewRange))
+        return;
+    const double minVisible = -0.02 * viewRange;
+    const double maxVisible = 1.20 * viewRange;
+    bool running = false;
+    double runStart = 0.0, runEnd = 0.0;
+    int direction = 0;
+    auto flush = [&]()
+    {
+        if (running && std::abs(runEnd - runStart) > 1e-6)
+            drawPiece(runStart, runEnd);
+        running = false;
+    };
+    auto first = scroll.upper_bound(begin);
+    MapTime windowStart = begin;
+    for (;;)
+    {
+        const MapTime windowEnd = first == scroll.end() || first->first >= end
+            ? end : first->first;
+        for (MapTime t = windowStart; t < windowEnd; )
+        {
+            const MapTime next = windowEnd - t <= kKSONHoldSamplingMs
+                ? windowEnd : t + kKSONHoldSamplingMs;
+            const double speed = scroll.ValueAt(t);
+            const double y0 = distance(t);
+            const double y1 = distance(next);
+            const bool skip = !std::isfinite(speed) ||
+                std::abs(speed) > kKSONHoldTeleportSpeed ||
+                !std::isfinite(y0) || !std::isfinite(y1) ||
+                std::abs(y1 - y0) > viewRange * 4.0 ||
+                std::max(y0, y1) < minVisible ||
+                std::min(y0, y1) > maxVisible;
+            if (skip)
+            {
+                flush();
+                t = next;
+                continue;
+            }
+            const double a = std::min(maxVisible, std::max(minVisible, y0));
+            const double b = std::min(maxVisible, std::max(minVisible, y1));
+            if (std::abs(b - a) < 1e-6)
+            {
+                flush();
+                t = next;
+                continue;
+            }
+            const int sign = b > a ? 1 : -1;
+            if (running && direction == sign && std::abs(runEnd - a) < 1e-4)
+                runEnd = b;
+            else
+            {
+                flush();
+                runStart = a;
+                runEnd = b;
+                direction = sign;
+                running = true;
+            }
+            t = next;
+        }
+        if (windowEnd >= end)
+            break;
+        windowStart = windowEnd;
+        ++first;
+    }
+    flush();
+}
+} // namespace
 
 const float Track::trackWidth = 1.0f;
 const float Track::buttonWidth = 1.0f / 6;
@@ -343,9 +456,11 @@ void Track::DrawLaserBase(RenderQueue& rq, class BeatmapPlayback& playback, cons
 		{
 			// Calculate height based on time on current track
 			float viewRange = GetViewRange();
-			float position = playback.TimeToViewDistance(obj->time);
+			float position = playback.ObjectViewDistance(obj);
 			float posmult = trackLength / (m_viewRange * laserSpeedOffset);
 
+			const float originY = posmult * position;
+			const float margin = trackLength * 0.25f;
 			Mesh laserMesh = m_laserTrackBuilder[laser->index]->GenerateTrackMesh(playback, laser);
 
 			MaterialParameterSet laserParams;
@@ -415,7 +530,9 @@ void Track::DrawObjectState(RenderQueue& rq, class BeatmapPlayback& playback, Ob
 		: obj->type == ObjectType::Laser ? obj->time <= playback.GetLastTime()
 		: false;
 
-	float position = dontUseScrollSpeedForPos ? playback.TimeToViewDistanceIgnoringScrollSpeed(obj->time) : playback.TimeToViewDistance(obj->time);
+	float position = dontUseScrollSpeedForPos ? playback.TimeToViewDistanceIgnoringScrollSpeed(obj->time) : playback.ObjectViewDistance(obj);
+	if (!playback.cMod && playback.GetBeatmap().GetKSONScroll())
+        position = playback.ObjectViewDistance(obj);
 	position /= viewRange;
 
 	if(obj->type == ObjectType::Single || obj->type == ObjectType::Hold)
@@ -528,14 +645,89 @@ void Track::DrawObjectState(RenderQueue& rq, class BeatmapPlayback& playback, Ob
 		params.SetParameter("suddenFadeWindow", suddenFadewindow); // Sudden cutoff (% of track)
 
 
+        if (isHold && !playback.cMod && playback.GetBeatmap().GetKSONScroll())
+        {
+            const auto& beatmap = playback.GetBeatmap();
+            const auto& scroll = *beatmap.GetKSONScroll();
+            const auto& path = beatmap.GetVisualPath(obj);
+            const double now = playback.GetLastTime();
+            const double origin = scroll.Position(now);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                if (path[i].first <= now) continue;
+                const double a = path[i-1].first < now ? 0.0 : path[i-1].second - origin;
+                const double b = path[i].second - origin;
+                const double low = std::max(-0.02 * viewRange, std::min(a, b));
+                const double high = std::min(1.20 * viewRange, std::max(a, b));
+                if (high <= low + 1e-6) continue;
+                const float start = float(low / viewRange), size = float((high-low) / viewRange);
+                params.SetParameter("trackPos", start);
+                params.SetParameter("trackScale", size / length);
+                Transform part = trackOrigin;
+                part *= Transform::Translation(Vector3(xposition, trackLength * start, 0.0f));
+                part *= Transform::Scale({xscale, trackLength * size / length, 1.0f});
+                rq.Draw(part, mesh, mat, params);
+            }
+            return;
+        }
+
+        // KSON_STAGE8_EXTREME_HOLD: only handle holds that actually overlap a
+        // teleport-like scroll point. Preserve upstream's path for every other
+        // chart, hold and button (including Deinos's ordinary FX longs).
+        if (isHold)
+        {
+            const LineGraph& scroll = playback.GetBeatmap().GetScrollSpeedGraph();
+            const MapTime holdEnd = mobj->time + mobj->hold.duration;
+            if (!playback.cMod && KSONHoldOverlapsTeleport(scroll, mobj->time, holdEnd))
+            {
+                const MapTime now = playback.GetLastTime();
+                const MapTime futureStart = std::max(mobj->time, now);
+                bool touchesCrit = false;
+                auto DrawPiece = [&](double a, double b)
+                {
+                    // Keep a positive scale even when the signed scroll runs
+                    // backwards. Reversing the *motion* must not invert UVs or
+                    // trigger backface culling on the original hold quad.
+                    const double low = std::min(a, b);
+                    const double high = std::max(a, b);
+                    if (high - low < 1e-5)
+                        return;
+                    if (low <= 0.02 * viewRange && high >= 0.0)
+                        touchesCrit = true;
+                    const float viewStart = static_cast<float>(low / viewRange);
+                    const float viewSize = static_cast<float>((high - low) / viewRange);
+                    params.SetParameter("trackPos", viewStart);
+                    params.SetParameter("trackScale", viewSize / length);
+                    Transform part = trackOrigin;
+                    part *= Transform::Translation(Vector3(xposition, trackLength * viewStart, 0.0f));
+                    part *= Transform::Scale({ xscale, trackLength * viewSize / length, 1.0f });
+                    rq.Draw(part, mesh, mat, params);
+                };
+                KSONDrawProjectedHold(scroll, futureStart, holdEnd,
+                    static_cast<double>(viewRange),
+                    [&](MapTime t) { return static_cast<double>(playback.TimeToViewDistance(t)); },
+                    DrawPiece);
+                // Keep a small, stationary hit-line indication if the hold is
+                // active but all future pieces are behind a teleport. It does
+                // not change hit state, timing, or the chart speed graph.
+                if (now >= mobj->hold.GetRoot()->time && now < holdEnd && !touchesCrit)
+                    DrawPiece(0.0, 0.05 * viewRange);
+                return;
+            }
+        }
+
 		buttonTransform *= Transform::Scale({ xscale, scale, 1.0f });
 		rq.Draw(buttonTransform, mesh, mat, params);
 	}
 	else if(obj->type == ObjectType::Laser) // Draw laser
 	{
-		position = playback.TimeToViewDistance(obj->time);
+		position = playback.ObjectViewDistance(obj);
 		float posmult = trackLength / (m_viewRange * laserSpeedOffset);
 		LaserObjectState* laser = (LaserObjectState*)obj;
+		const float laserOriginY = posmult * position;
+		const float laserMargin = trackLength * 0.25f;
+		const float laserClipMin = -laserMargin - laserOriginY;
+		const float laserClipMax = trackLength + laserMargin - laserOriginY;
 
 		// Draw segment function
 		auto DrawSegment = [&](Mesh mesh, Texture texture, int part)
@@ -577,7 +769,8 @@ void Track::DrawObjectState(RenderQueue& rq, class BeatmapPlayback& playback, Ob
 		};
 
 		// Draw entry?
-		if(!laser->prev)
+		if(!laser->prev && laserOriginY >= -laserMargin &&
+			laserOriginY <= trackLength + laserMargin)
 		{
 			Mesh laserTail = m_laserTrackBuilder[laser->index]->GenerateTrackEntry(playback, laser);
 			DrawSegment(laserTail, laserTailTextures[laser->index], 1);
@@ -588,7 +781,12 @@ void Track::DrawObjectState(RenderQueue& rq, class BeatmapPlayback& playback, Ob
 		DrawSegment(laserMesh, laserTextures[laser->index], 0);
 
 		// Draw exit?
-		if(!laser->next && (laser->flags & LaserObjectState::flag_Instant) != 0) // Only draw exit on slams
+		const float laserExitY = laserOriginY + ((laser->flags & LaserObjectState::flag_Instant) != 0
+            ? m_laserTrackBuilder[laser->index]->SlamLength(playback, laser)
+            : posmult * playback.ToViewDistance(laser->time, laser->duration));
+		if(!laser->next && (laser->flags & LaserObjectState::flag_Instant) != 0 &&
+			std::isfinite(laserExitY) && laserExitY >= -laserMargin &&
+			laserExitY <= trackLength + laserMargin) // Only draw exit on slams
 		{
 			Mesh laserTail = m_laserTrackBuilder[laser->index]->GenerateTrackExit(playback, laser);
 			DrawSegment(laserTail, laserTailTextures[2 + laser->index], 2);

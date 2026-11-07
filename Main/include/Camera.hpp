@@ -119,6 +119,7 @@ public:
 	float pLaneZoom = 0.0f;
 	float pLanePitch = 0.0f;
 	float pLaneTilt = 0.0f;
+	float pKSONRotationDegrees = 0.0f; // independent highway + crit-line rotation
 	bool pManualTiltEnabled = false;
 
 	float pitchUnit = KSM_PITCH_UNIT_POST_168;

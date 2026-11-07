@@ -2,6 +2,8 @@
 #include "BeatmapObjects.hpp"
 #include "AudioEffects.hpp"
 #include "EffectTimeline.hpp"
+#include "KSONScroll.hpp"
+#include <unordered_map>
 #include <Shared/Resource.hpp>
 
 /* Global settings stored in a beatmap */
@@ -174,8 +176,49 @@ public:
 
 	float GetCenterSplitValueAt(MapTime mapTime) const;
 	float GetScrollSpeedAt(MapTime mapTime) const;
+	// KSON_STAGE8_EXTREME_HOLD: read-only renderer inspection of authored scroll nodes.
+	const LineGraph& GetScrollSpeedGraph() const noexcept
+	{
+		return m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED);
+	}
+	// Negative scroll speeds make future object distance non-monotonic.
+	// Used only to select the safe renderer visibility path; never clamps scroll.
+	bool HasReverseScroll() const
+	{
+		const auto& graph = m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED);
+		for (const auto& point : graph)
+		{
+			if (point.second.value.first < 0.0 || point.second.value.second < 0.0)
+				return true;
+		}
+		return false;
+	}
+
+    using VisualPath = std::vector<std::pair<double,double>>; // exact ms, absolute scroll beats
+    const VisualPath& GetVisualPath(const ObjectState* obj) const
+    {
+        static const VisualPath empty;
+        const auto it = m_visualPaths.find(obj);
+        return it == m_visualPaths.end() ? empty : it->second;
+    }
+    const std::vector<double>& GetKSONBars() const { return m_ksonBars; }
+    const KSONScroll* GetKSONScroll() const { return m_ksonScroll.get(); }
+    std::pair<double, double> GetVisualTimes(const ObjectState* obj) const
+    {
+        const auto it = m_visualTimes.find(obj);
+        if (it != m_visualTimes.end()) return it->second;
+        double end = obj->time;
+        const MultiObjectState* state = *obj;
+        if (obj->type == ObjectType::Hold) end += state->hold.duration;
+        if (obj->type == ObjectType::Laser) end += state->laser.duration;
+        return {double(obj->time), end};
+    }
 
 private:
+    std::unordered_map<const ObjectState*, VisualPath> m_visualPaths;
+    std::vector<double> m_ksonBars;
+    std::unique_ptr<KSONScroll> m_ksonScroll;
+    std::unordered_map<const ObjectState*, std::pair<double,double>> m_visualTimes;
 	bool m_ProcessKShootMap(BinaryStream& input, bool metadataOnly);
 	bool m_ProcessKSON(const Resource& resource, bool metadataOnly);
 

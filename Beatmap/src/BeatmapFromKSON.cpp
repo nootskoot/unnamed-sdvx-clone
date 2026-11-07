@@ -1,9 +1,12 @@
 // KSON format_version=1 experimental native importer for USC.
-// Stage 1: metadata, BPM, time signatures, stops, graph scroll speeds,
-// BT/FX chips and holds, laser sections/slams. No custom audio or camera yet.
+// Native pulse-space scrolling with millisecond gameplay judgements.
+// Audio mappings use USC DSPs; unsupported automation is reported explicitly.
 #include "stdafx.h"
 #include "Beatmap.hpp"
 #include "json.hpp"
+#include "KShootMap.hpp"
+
+AudioEffect ParseCustomEffect(const KShootEffectDefinition&, Vector<String>&);
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -20,6 +23,7 @@ constexpr double PULSES_PER_BEAT = 240.0;
 struct TempoStep { uint32 pulse; double bpm; double ms; };
 
 uint32 GetPulse(const J& j) {
+    if (!j.is_number_integer()) throw std::runtime_error("KSON pulse must be an integer");
     const auto i = j.get<int64_t>();
     if (i < 0 || i > std::numeric_limits<uint32>::max())
         throw std::runtime_error("KSON pulse outside uint32 range");
@@ -88,9 +92,15 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             char chunk[16384];
             size_t bytes = 0;
             while ((bytes = file.Read(chunk, sizeof(chunk))) != 0)
+                {
+                if (source.size() + bytes > 32 * 1024 * 1024)
+                    throw std::runtime_error("KSON file exceeds 32 MiB safety limit");
                 source.append(chunk, bytes);
+            }
         } else if (resource.IsValid() && resource.GetBytes()) {
             const auto& bytes = *resource.GetBytes();
+            if (bytes.size() > 32 * 1024 * 1024)
+                throw std::runtime_error("KSON file exceeds 32 MiB safety limit");
             source.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         } else {
             return false;
@@ -118,6 +128,8 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         m_settings.difficulty = uint8(0);
         if (meta.contains("difficulty") && meta["difficulty"].is_number_integer())
             m_settings.difficulty = uint8(std::max(0, std::min(3, meta["difficulty"].get<int>())));
+        else if (meta.contains("difficulty") && meta["difficulty"].is_string())
+            m_settings.difficulty = uint8(3); // KSM v2 maps all custom difficulty names to index 3.
         m_settings.audioNoFX = bgm.value("filename", std::string());
         m_settings.audioFX = "";
         m_settings.offset = bgm.value("offset", 0);
@@ -182,13 +194,14 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             }
             tempos.push_back({b.first, b.second, ms});
         }
-        auto TimeAt = [&](uint32 y) -> MapTime {
+        auto ExactTimeAt = [&](uint32 y) -> double {
             const auto it = std::upper_bound(tempos.begin(), tempos.end(), y,
                 [](uint32 p, const TempoStep& s) { return p < s.pulse; });
             const TempoStep& v = *(it == tempos.begin() ? tempos.begin() : it - 1);
-            return RoundTime(double(m_settings.offset) + v.ms +
-                double(y - v.pulse) * 60000.0 / (v.bpm * PULSES_PER_BEAT));
+            return double(m_settings.offset) + v.ms +
+                double(y - v.pulse) * 60000.0 / (v.bpm * PULSES_PER_BEAT);
         };
+        auto TimeAt = [&](uint32 y) { return RoundTime(ExactTimeAt(y)); };
         std::set<uint32> timingPulses;
         for (const auto& t : bpmAtPulse) timingPulses.insert(t.first);
         for (const auto& t : signatureAtPulse) timingPulses.insert(t.first);
@@ -207,11 +220,15 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             m_timingPoints.Add(std::move(point));
         }
         if (metadataOnly) return true;
+        m_ksonScroll = std::make_unique<KSONScroll>();
+        m_visualTimes.clear();
+        m_visualPaths.clear();
+        for (const auto& t : tempos)
+            m_ksonScroll->tempos.push_back({double(t.pulse), t.bpm, t.ms + m_settings.offset});
 
         // KSON camera: use USC's existing graph consumers. The values use
         // the same /100 scaling as the KSH zoom and center_split settings.
-        // Graph control points are preserved, although USC's LineGraph::ValueAt
-        // currently interpolates linearly (curved rendering needs separate work).
+        // Camera graph control points are evaluated by LineGraph.
         const J& camera = Member(root, "camera");
         const J& cameraBody = Member(Member(camera, "cam"), "body");
         auto ReadCameraGraph = [&](const char* key, LineGraph& graph, double scale) {
@@ -234,6 +251,9 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         ReadCameraGraph("zoom_bottom", m_effects.GetGraph(EffectTimeline::GraphType::ZOOM_BOTTOM), 0.01);
         ReadCameraGraph("zoom_side", m_effects.GetGraph(EffectTimeline::GraphType::SHIFT_X), 0.01);
         ReadCameraGraph("center_split", m_centerSplit, 0.01);
+        // KSON rotation_deg is in DEGREES, unlike KSH manual tilt.
+        // Keep a separate graph so it composes with (not replaces) tilt.
+        ReadCameraGraph("rotation_deg", m_effects.GetGraph(EffectTimeline::GraphType::KSON_ROTATION_DEG), 1.0);
 
         // KSON tilt: dispatch the same TrackRollBehaviour events used for KSH.
         // Manual tilt values are mapped using the KSH manual rotation conversion.
@@ -337,11 +357,13 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         obj->time = TimeAt(y);
                         obj->duration = std::max(MapTime(1), MapTime(TimeAt(y + len) - obj->time));
                         obj->index = uint8(baseIndex + i);
+                        m_visualTimes[*obj] = {ExactTimeAt(y), ExactTimeAt(y + len)};
                         m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*obj));
                     } else {
                         auto* obj = new ButtonObjectState();
                         obj->time = TimeAt(y);
                         obj->index = uint8(baseIndex + i);
+                        m_visualTimes[*obj] = {ExactTimeAt(y), ExactTimeAt(y + len)};
                         m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*obj));
                     }
                 }
@@ -396,6 +418,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     obj->index = uint8(lane);
                     obj->time = TimeAt(y0);
                     obj->tick = y0;
+                    m_visualTimes[*obj] = {ExactTimeAt(y0), ExactTimeAt(y1)};
                     obj->duration = instantaneous ? 0 : std::max(MapTime(0), MapTime(TimeAt(y1) - obj->time));
                     obj->points[0] = float(p0);
                     obj->points[1] = float(p1);
@@ -428,6 +451,9 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         throw std::runtime_error("KSON laser tick overflow");
                     const uint32 y = sectionY + rel;
                     const auto values = GraphPair(pt[1]);
+                    if ((!first && y <= prevY) || !std::isfinite(values.first) ||
+                        !std::isfinite(values.second))
+                        throw std::runtime_error("Invalid KSON laser point ordering or position");
                     lastPulse = std::max(lastPulse, y);
                     if (!first && y > prevY) {
                         const MapTime elapsed = TimeAt(y) - TimeAt(prevY);
@@ -479,6 +505,11 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             LineGraph::Point p(v.first, v.second);
             if (point.size() >= 3 && point[2].is_array() && point[2].size() == 2)
                 p.curve = {point[2][0].get<double>(), point[2][1].get<double>()};
+            if (!std::isfinite(v.first) || !std::isfinite(v.second) ||
+                !std::isfinite(p.curve.first) || !std::isfinite(p.curve.second) ||
+                p.curve.first < 0 || p.curve.first > 1 || p.curve.second < 0 || p.curve.second > 1)
+                throw std::runtime_error("Invalid KSON scroll graph");
+            m_ksonScroll->graph[y] = {v.first, v.second, p.curve.first, p.curve.second};
             scroll.Insert(TimeAt(y), p);
             lastPulse = std::max(lastPulse, y);
         }
@@ -488,8 +519,165 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             if (uint64_t(y) + len > std::numeric_limits<uint32>::max())
                 throw std::runtime_error("KSON stop tick overflow");
             lastPulse = std::max(lastPulse, uint32(y + len));
+            m_ksonScroll->stops[y] = len;
             if (len && TimeAt(y + len) > TimeAt(y))
                 scroll.RangeSet(TimeAt(y), TimeAt(y + len), 0.0);
+        }
+
+        // Adapt supported native audio definitions to USC's existing DSP parser.
+        // Definitions are per event so overrides never mutate another hold.
+        const std::map<std::string, std::string> effectNames = {
+            {"retrigger","Retrigger"},{"gate","Gate"},{"flanger","Flanger"},
+            {"phaser","Phaser"},{"tapestop","TapeStop"},{"bitcrusher","BitCrusher"},
+            {"wobble","Wobble"},{"sidechain","SideChain"},{"echo","Echo"},
+            {"panning","Panning"},{"pitch_shift","PitchShift"},
+            {"low_pass_filter","LPF"},{"high_pass_filter","HPF"},
+            {"peaking_filter","PEAK"},{"switch_audio","SwitchAudio"}};
+        const std::map<std::string, std::string> paramNames = {
+            {"wave_length","waveLength"},{"update_period","updatePeriod"},
+            {"freq_1","loFreq"},{"freq_2","hiFreq"},{"q","Q"},
+            {"stereo_width","stereoWidth"},{"hi_cut_gain","hiCutGain"},
+            {"attack_time","attackTime"},{"hold_time","holdTime"},
+            {"release_time","releaseTime"},{"filename","fileName"}};
+        const J& effects = Member(audio,"audio_effect");
+        uint32 nextEffect = uint32(EffectType::UserDefined0);
+        auto MakeEffect = [&](const J& category, const std::string& name, const J& overrides) {
+            J definition = {{"type",name},{"v",J::object()}};
+            for (const auto& def : Items(category,"def"))
+                if (def.is_array() && def.size()==2 && def[0]==name) definition=def[1];
+            const auto type = effectNames.find(definition.value("type", std::string()));
+            if (type==effectNames.end()) {
+                Logf("[KSON] Unsupported audio effect: %s",Logger::Severity::Warning,name.c_str());
+                return AudioEffect::GetDefault(EffectType::None);
+            }
+            KShootEffectDefinition legacy;
+            legacy.typeName=name;
+            legacy.parameters["type"]=type->second;
+            J parameters = Member(definition,"v");
+            if (overrides.is_object()) for(auto it=overrides.begin();it!=overrides.end();++it) parameters[it.key()]=it.value();
+            for(auto it=parameters.begin();it!=parameters.end();++it) {
+                const auto key=paramNames.find(it.key());
+                const std::string mapped=key==paramNames.end()?it.key():key->second;
+                legacy.parameters[mapped]=it.value().is_string()?it.value().get<std::string>():it.value().dump();
+            }
+            return ParseCustomEffect(legacy,m_switchablePaths);
+        };
+        auto AddEvent = [&](uint32 pulse, EventKey key) {
+            auto* event = new EventObjectState();
+            event->time=TimeAt(pulse); event->key=key; event->interTickIndex=0;
+            m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*event));
+            lastPulse=std::max(lastPulse,pulse);
+            return event;
+        };
+        const J& fxEffects=Member(effects,"fx");
+        for (auto named=Member(fxEffects,"long_event").begin();named!=Member(fxEffects,"long_event").end();++named) {
+            if (!named.value().is_array()) continue;
+            for(size_t lane=0;lane<named.value().size() && lane<2;++lane) {
+                for(const auto& event:named.value()[lane]) {
+                    const uint32 y=GetPulse(event.is_array()?event[0]:event);
+                    const J overrides=event.is_array() && event.size()>1?event[1]:J::object();
+                    const auto effect=MakeEffect(fxEffects,named.key(),overrides);
+                    if(effect.type==EffectType::None) continue;
+                    HoldObjectState* hold=nullptr;
+                    const double exact=ExactTimeAt(y);
+                    for(auto& object:m_objectStates) {
+                        if(object->type!=ObjectType::Hold) continue;
+                        auto* candidate=(HoldObjectState*)object.get();
+                        const auto times=GetVisualTimes(object.get());
+                        if(candidate->index==lane+4 && exact>=times.first-1e-6 && exact<times.second-1e-6) {
+                            hold=candidate; break;
+                        }
+                    }
+                    if(!hold) {
+                        Logf("[KSON] FX event without a matching hold at pulse %u",Logger::Severity::Warning,y);
+                        continue;
+                    }
+                    const auto times=GetVisualTimes(*hold);
+                    if(exact>times.first+1e-6) {
+                        // Preserve the hold chain when an effect starts mid-note.
+                        const MapTime split=TimeAt(y), end=hold->time+hold->duration;
+                        if(split<=hold->time || split>=end) {
+                            Logf("[KSON] Sub-millisecond FX split cannot be represented at pulse %u",Logger::Severity::Warning,y);
+                            continue;
+                        }
+                        auto* continuation=new HoldObjectState(*hold);
+                        continuation->time=split; continuation->duration=end-split;
+                        continuation->prev=hold;
+                        if(hold->next) hold->next->prev=continuation;
+                        hold->next=continuation; hold->duration=split-hold->time;
+                        m_visualTimes[*hold]={times.first,exact};
+                        m_visualTimes[*continuation]={exact,times.second};
+                        m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*continuation));
+                        hold=continuation;
+                    }
+                    hold->effectType=EffectType(nextEffect++);
+                    m_customAudioEffects[hold->effectType]=effect;
+                    // USC's SetParams expects legacy integer controls.
+                    const double whole=GetTimingPoint(hold->time,m_timingPoints.begin())->GetWholeNoteLength();
+                    auto duration=effect.duration.Sample(1);
+                    const double length=duration.Absolute(whole);
+                    hold->effectParams[0]=int16(std::clamp(std::round(length>0?whole/length:4),1.0,32767.0));
+                    if(effect.type==EffectType::Bitcrush) hold->effectParams[0]=int16(std::clamp(effect.bitcrusher.reduction.Sample(1),0,32767));
+                    if(effect.type==EffectType::TapeStop) hold->effectParams[0]=int16(std::clamp(std::round(duration.type==EffectDuration::Rate?double(duration.rate)*100:16000/std::max(1.0,length)),1.0,32767.0));
+                    if(effect.type==EffectType::PitchShift) hold->effectParams[0]=int16(std::clamp(effect.pitchshift.amount.Sample(1),-32768.0f,32767.0f));
+                    if(effect.type==EffectType::Echo) hold->effectParams[1]=int16(std::clamp(effect.echo.feedback.Sample(1)*100,0.0f,32767.0f));
+                }
+            }
+        }
+        const J& laserEffects=Member(effects,"laser");
+        for(auto named=Member(laserEffects,"pulse_event").begin();named!=Member(laserEffects,"pulse_event").end();++named) {
+            const auto effect=MakeEffect(laserEffects,named.key(),J::object());
+            if(effect.type==EffectType::None) continue;
+            const auto id=EffectType(nextEffect++);
+            m_customAudioFilters[id]=effect;
+            for(const auto& event:named.value()) {
+                if(!event.is_number_integer()) continue;
+                AddEvent(GetPulse(event),EventKey::LaserEffectType)->data.effectVal=id;
+            }
+        }
+        for(const auto& e:Items(Member(laserEffects,"legacy"),"filter_gain"))
+            if(e.is_array() && e.size()==2) AddEvent(GetPulse(e[0]),EventKey::LaserEffectMix)->data.floatVal=e[1].get<float>();
+        const J& keySound=Member(audio,"key_sound");
+        const J& chipEvents=Member(Member(keySound,"fx"),"chip_event");
+        for(auto sample=chipEvents.begin();sample!=chipEvents.end();++sample) {
+            if(!sample.value().is_array() || m_samplePaths.size()>=255) continue;
+            const uint8 index=uint8(m_samplePaths.size());
+            m_samplePaths.Add(sample.key());
+            for(size_t lane=0;lane<sample.value().size() && lane<2;++lane)
+                for(const auto& event:sample.value()[lane]) {
+                    const uint32 y=GetPulse(event.is_array()?event[0]:event);
+                    const float volume=event.is_array() && event.size()>1?event[1].value("vol",1.0f):1.0f;
+                    for(auto& object:m_objectStates) {
+                        if(object->type!=ObjectType::Single) continue;
+                        auto* button=(ButtonObjectState*)object.get();
+                        if(button->index==lane+4 && std::abs(GetVisualTimes(object.get()).first-ExactTimeAt(y))<1e-6) {
+                            button->hasSample=true; button->sampleIndex=index; button->sampleVolume=volume;
+                        }
+                    }
+                }
+        }
+        for(const auto& e:Items(Member(keySound,"laser"),"vol"))
+            if(e.is_array() && e.size()==2) AddEvent(GetPulse(e[0]),EventKey::SlamVolume)->data.floatVal=e[1].get<float>();
+        if(!Member(fxEffects,"param_change").empty() || !Member(laserEffects,"param_change").empty())
+            Log("[KSON] Dynamic audio parameter automation is not yet supported",Logger::Severity::Warning);
+
+        m_ksonScroll->Build();
+        m_ksonBars.clear();
+        for (auto sig=signatureAtPulse.begin(); sig!=signatureAtPulse.end(); ++sig) {
+            const uint64_t stop=std::next(sig)==signatureAtPulse.end()?uint64_t(lastPulse)+1:std::next(sig)->first;
+            const uint32 step=MeasurePulses(sig->second.first,sig->second.second);
+            for(uint64_t y=sig->first;y<stop;y+=step) {
+                if(m_ksonBars.size()>=1000000) throw std::runtime_error("Too many KSON measure lines");
+                m_ksonBars.push_back(m_ksonScroll->PositionAtPulse(double(y)));
+            }
+        }
+        for (const auto& obj : m_objectStates) {
+            if (obj->type != ObjectType::Hold && obj->type != ObjectType::Laser) continue;
+            const auto times = GetVisualTimes(obj.get());
+            auto& path = m_visualPaths[obj.get()];
+            for (double t : m_ksonScroll->Times(times.first, times.second,
+                    obj->type == ObjectType::Laser ? 8.0 : 0.0))
+                path.emplace_back(t, m_ksonScroll->Position(t));
         }
 
         auto* end = new EventObjectState();

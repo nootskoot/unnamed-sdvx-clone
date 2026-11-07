@@ -235,7 +235,10 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 
 	float lanePitch = PitchScaleFunc(pLanePitch) * pitchUnit;
 
-	worldNormal = GetOriginTransform(lanePitch, m_totalOffset, m_totalRoll * 360.0f);
+	// Add KSON rotation_deg after normal/manual tilt composition.
+	// Reduce very large authored rotations modulo 360 before trigonometry.
+	const float renderKSONRotation = fmodf(pKSONRotationDegrees, 360.0f);
+	worldNormal = GetOriginTransform(lanePitch, m_totalOffset, m_totalRoll * 360.0f + renderKSONRotation);
 	worldNoRoll = GetOriginTransform(lanePitch, 0, 0);
 
 	auto GetZoomedTransform = [&](Transform t)
@@ -253,7 +256,7 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 
 	track->trackOrigin = GetZoomedTransform(worldNormal);
 
-	critOrigin = GetZoomedTransform(GetOriginTransform(lanePitch, m_totalOffset, m_actualRoll * 360.0f + sin(m_spinRoll * Math::pi * 2) * 20));
+	critOrigin = GetZoomedTransform(GetOriginTransform(lanePitch, m_totalOffset, m_actualRoll * 360.0f + sin(m_spinRoll * Math::pi * 2) * 20 + renderKSONRotation));
 }
 void Camera::AddCameraShake(float cameraShake)
 {
