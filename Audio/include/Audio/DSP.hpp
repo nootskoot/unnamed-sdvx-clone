@@ -310,6 +310,8 @@ public:
 	PitchShiftDSP(uint32 sampleRate);
 
 	// Pitch change amount
+	int32 chunkSize = 0;
+	float overlap = 0.4f;
 	float amount = 0.0f;
 
 	~PitchShiftDSP();
@@ -319,5 +321,8 @@ public:
 	virtual const char *GetName() const { return "PitchShiftDSP"; }
 
 private:
+    Vector<float> m_grainBuffer;
+    uint32 m_grainCursor = 0;
+    double m_grainPhase = 0;
 	class PitchShiftDSP_Impl *m_impl;
 };

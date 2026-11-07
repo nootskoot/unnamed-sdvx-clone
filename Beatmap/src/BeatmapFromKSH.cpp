@@ -2,19 +2,21 @@
 #include "Beatmap.hpp"
 #include "KShootMap.hpp"
 #include "KSH2Bridge.hpp"
+#include "KSHCompatibility.hpp"
 #include <cmath> // std::isfinite for malformed KSH tempo protection
 
 // Temporary object to keep track if a button is a hold button
 struct TempButtonState
 {
-	TempButtonState(uint32 startTick)
+	TempButtonState(double startTick)
 		: startTick(startTick)
 	{
 	}
-	uint32 startTick;
+	double startTick;
 	uint32 numTicks = 0;
 	EffectType effectType = EffectType::None;
 	uint16 effectParams[2] = {0};
+    uint8 effectParamMask = 0;
 	// If using the smalles grid to indicate hold note duration
 	bool fineSnap = false;
 	// Set for hold continuations, this is where there is a hold right after an existing one but with different effects
@@ -26,12 +28,12 @@ struct TempButtonState
 };
 struct TempLaserState
 {
-	TempLaserState(uint32 startTick, uint32 absoluteStartTick, uint32 effectType)
+	TempLaserState(double startTick, double absoluteStartTick, uint32 effectType)
 		: startTick(startTick), effectType(effectType), absoluteStartTick(absoluteStartTick)
 	{
 	}
-	uint32 startTick;
-	uint32 absoluteStartTick;
+	double startTick;
+	double absoluteStartTick;
 	uint32 numTicks = 0;
 	uint32 effectType = 0;
 	bool spinIsBounce = false;
@@ -175,12 +177,15 @@ struct MultiParamRange
 static MultiParam ParseParam(const String &in)
 {
 	MultiParam ret;
+    ret.type = MultiParam::Int; ret.ival = 0;
 	if (in.find('/') != -1)
 	{
 		ret.type = MultiParam::Float;
 		String a, b;
 		in.Split("/", &a, &b);
-		ret.fval = (float)(atof(*a) / atof(*b));
+		const double denominator = atof(*b);
+        const double ratio = denominator != 0 ? atof(*a) / denominator : 0.0;
+        ret.fval = std::isfinite(ratio) ? float(ratio) : 0.0f;
 	}
 	else if (in.find("samples") != -1)
 	{
@@ -204,8 +209,8 @@ static MultiParam ParseParam(const String &in)
 	else if (in.find("%") != -1)
 	{
 		ret.type = MultiParam::Float;
-		int percentage = 0;
-		sscanf(*in, "%i", &percentage);
+		float percentage = 0;
+		sscanf(*in, "%f", &percentage);
 		ret.fval = percentage / 100.0f;
 	}
 	else if (in.find('.') != -1)
@@ -340,6 +345,9 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 	{
 	case EffectType::PitchShift:
 		AssignFloatIfSet(effect.pitchshift.amount, "pitch");
+        effect.pitchChunk = 700;
+        AssignSamplesIfSet(effect.pitchChunk, "chunkSize");
+        AssignFloatIfSet(effect.pitchOverlap, "overWrap");
 		break;
 	case EffectType::Bitcrush:
 		// Both legacy "amount" and the documented KSH "reduction" key.
@@ -393,6 +401,22 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 	case EffectType::TapeStop:
 		AssignDurationIfSet(effect.duration, "speed");
 		break;
+    case EffectType::PeakingFilter:
+        AssignFloatIfSet(effect.peaking.freq, "freq");
+        AssignFloatIfSet(effect.peaking.q, "Q");
+        AssignFloatIfSet(effect.peaking.gain, "gain");
+        break;
+    case EffectType::LowPassFilter:
+        AssignFloatIfSet(effect.lpf.freq, "freq");
+        AssignFloatIfSet(effect.lpf.q, "Q");
+        break;
+    case EffectType::HighPassFilter:
+        AssignFloatIfSet(effect.hpf.freq, "freq");
+        AssignFloatIfSet(effect.hpf.q, "Q");
+        break;
+    case EffectType::Panning:
+        AssignFloatIfSet(effect.panning.panning, "pan");
+        break;
 	case EffectType::SwitchAudio:
 		AssignIntIfSet(effect.switchaudio.index, "index");
 		break;
@@ -442,14 +466,32 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 	if (!kshootMap.Init(input, metadataOnly))
 		return false;
 
+    // KSH applies a late beat= to the next measure. Move it before timing conversion.
+    for (size_t block = 0; block < kshootMap.blocks.size(); ++block) {
+        Vector<KShootTickSetting> deferred;
+        auto& ticks = kshootMap.blocks[block].ticks;
+        for (size_t row = 1; row < ticks.size(); ++row) {
+            auto& options = ticks[row].settings;
+            for (auto it = options.begin(); it != options.end();) {
+                if (it->first == "beat") { deferred.push_back(*it); it = options.erase(it); }
+                else ++it;
+            }
+        }
+        if (!deferred.empty() && block + 1 < kshootMap.blocks.size() && !kshootMap.blocks[block+1].ticks.empty()) {
+            auto& next = kshootMap.blocks[block+1].ticks[0].settings;
+            next.insert(next.begin(), deferred.begin(), deferred.end());
+        }
+    }
 	EffectTypeMap effectTypeMap;
 	EffectTypeMap filterTypeMap;
 	Map<EffectType, int16> defaultEffectParams;
 
 	// Set defaults
 	{
-		defaultEffectParams[EffectType::Bitcrush] = 4;
-		defaultEffectParams[EffectType::Gate] = 8;
+		defaultEffectParams[EffectType::Bitcrush] = 5;
+		defaultEffectParams[EffectType::Gate] = 4;
+		defaultEffectParams[EffectType::PitchShift] = 12;
+		defaultEffectParams[EffectType::Echo] = 4;
 		defaultEffectParams[EffectType::Retrigger] = 8;
 		defaultEffectParams[EffectType::Phaser] = 2000;
 		defaultEffectParams[EffectType::Flanger] = 2000;
@@ -507,6 +549,8 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 	m_settings.previewOffset = 0;
 	m_settings.previewDuration = 0;
 	m_settings.slamVolume = 0.5f; // KSH default chokkakuvol=50
+    m_settings.slamAutoVolume = true; // KSH default chokkakuautovol=1
+    m_settings.laserEffectMix = 0.5f; // KSH default pfiltergain=50
 	for (auto &s : kshootMap.settings)
 	{
 		if (s.first == "title")
@@ -555,6 +599,8 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 		{
 			m_settings.laserEffectMix = (float)atol(*s.second) / 100.0f;
 		}
+        else if (s.first == "chokkakuautovol")
+            m_settings.slamAutoVolume = atoi(*s.second) != 0;
 		else if (s.first == "chokkakuvol")
 		{
 			m_settings.slamVolume = (float)atol(*s.second) / 100.0f;
@@ -609,6 +655,9 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 	const String* behaviorVersion = (compatVersion && !compatVersion->empty()) ? compatVersion : formatVersion;
 	const int behaviorVersionNumber = (behaviorVersion && !behaviorVersion->empty())
 		? atoi(behaviorVersion->data()) : 100;
+    m_settings.kshBehaviorVersion = behaviorVersionNumber;
+    m_settings.kshLegacyKeep = behaviorVersionNumber < 120 ||
+        (behaviorVersionNumber == 120 && (!behaviorVersion || *behaviorVersion < "120b"));
 	if (behaviorVersionNumber < 120)
 		m_settings.musicVolume *= 0.6f;
 
@@ -620,9 +669,9 @@ const static int tickResolution = 240;
 	size_t refTimingPointInd = 0;
 	double refTimingPointTime = 0.0;
 
-	Vector<uint32> timingPointTicks = {0};
+	Vector<double> timingPointTicks = {0};
 
-	auto TickToMapTime = [&](uint32 tick) {
+	auto TickToMapTime = [&](double tick) {
 		if (tick < timingPointTicks[refTimingPointInd])
 		{
 			refTimingPointInd = 0;
@@ -630,12 +679,12 @@ const static int tickResolution = 240;
 		}
 		while (refTimingPointInd + 1 < timingPointTicks.size() && timingPointTicks[refTimingPointInd + 1] <= tick)
 		{
-			const MapTime timeDiff = timingPointTicks[refTimingPointInd+1] - timingPointTicks[refTimingPointInd];
+			const double timeDiff = timingPointTicks[refTimingPointInd+1] - timingPointTicks[refTimingPointInd];
 			refTimingPointTime += Math::MSFromTicks((double) timeDiff, m_timingPoints[refTimingPointInd].GetBPM(), static_cast<double>(tickResolution));
 			++refTimingPointInd;
 		}
 
-		const uint32 tickDiff = tick - timingPointTicks[refTimingPointInd];
+		const double tickDiff = tick - timingPointTicks[refTimingPointInd];
 
 		double mapTime = refTimingPointTime;
 		mapTime += Math::MSFromTicks((double) tickDiff, m_timingPoints[refTimingPointInd].GetBPM(), static_cast<double>(tickResolution));
@@ -669,8 +718,11 @@ const static int tickResolution = 240;
 		firstTimingPoint.time = atol(*kshootMap.settings["o"]);
 		refTimingPointTime = static_cast<double>(firstTimingPoint.time);
 
-		double bpm = atof(*kshootMap.settings["t"]);
-		if (!(bpm > 0.0))
+		auto validBPM = [&](double value) {
+            return std::isfinite(value) && value > 0 && (behaviorVersionNumber < 130 || value <= 65535.0);
+        };
+        double bpm = atof(*kshootMap.settings["t"]);
+		if (!validBPM(bpm))
 		{
 			// Some KSH charts use a display-only header t=--- and put
 			// the real starting tempo on the very first note tick.
@@ -682,7 +734,7 @@ const static int tickResolution = 240;
 					if (setting.first == "t")
 					{
 						const double candidate = atof(*setting.second);
-						if (candidate > 0.0)
+						if (validBPM(candidate))
 						{
 							bpm = candidate;
 							break;
@@ -692,7 +744,7 @@ const static int tickResolution = 240;
 			}
 			// Match KSM v1's missing-tempo fallback if the chart never
 			// supplies a valid tempo at the start.
-			if (!(bpm > 0.0))
+			if (!validBPM(bpm))
 				bpm = 120.0;
 		}
 		firstTimingPoint.beatDuration = 60000.0 / bpm;
@@ -718,20 +770,25 @@ const static int tickResolution = 240;
 	TempButtonState *buttonStates[6] = {nullptr};
 	// Laser segment states
 	TempLaserState *laserStates[2] = {nullptr};
+    Map<MapTime, uint8> slamSounds;
+    Map<const LaserObjectState*, double> exactLaserTicks;
+    Map<String, KShootEffectDefinition> automatedFX = kshootMap.fxDefines;
+    Map<String, KShootEffectDefinition> automatedFilters = kshootMap.filterDefines;
 
 	EffectType currentButtonEffectTypes[2] = {EffectType::None};
 	// 2 per button
 	int16 currentButtonEffectParams[4] = {-1, -1, -1, -1};
+    uint8 currentButtonParamMask[2] = {0,0};
 	const uint32 maxEffectParamsPerButtons = 2;
 	float laserRanges[2] = {1.0f, 1.0f};
 	MapTime lastLaserPointTime[2] = {0, 0};
 
 	// Stops will be applied after the scroll speed graph is constructed.
 	// Tuple of (stopBegin, stopEnd, isOverlappingStop)
-	Vector<std::tuple<MapTime, MapTime, bool>> stops;
+	Vector<std::tuple<double, double, bool>> stops;
 
 	MapTime lastMapTime = 0;
-	uint32 currentTick = 0;
+	double currentTick = 0;
 
 	bool isManualTilt = false;
 	for (KShootMap::TickIterator it(kshootMap); it; ++it)
@@ -775,6 +832,8 @@ const static int tickResolution = 240;
 			// Parser the effect and parameters of an FX button (1.60)
 			auto ParseFXAndParameters = [&](String in, int16 *paramsOut) {
 				// Clear parameters
+                auto& explicitMask = currentButtonParamMask[(paramsOut - currentButtonEffectParams) / 2];
+                explicitMask = 0;
 				memset(paramsOut, -1, sizeof(uint16) * maxEffectParamsPerButtons);
 
 				String effectName = in;
@@ -800,11 +859,11 @@ const static int tickResolution = 240;
 					String effectParams = p.second.substr(paramSplit + 1);
 					if (effectParams.Split(";", &paramA, &paramB))
 					{
+						explicitMask = 3;
 						paramsOut[0] = atoi(*paramA);
 						paramsOut[1] = atoi(*paramB);
 					}
-					else
-						paramsOut[0] = atoi(*effectParams);
+					else { explicitMask = 1; paramsOut[0] = atoi(*effectParams); }
 				}
 				else //set default params
 				{
@@ -825,6 +884,7 @@ const static int tickResolution = 240;
 					}
 				}
 
+                if (*type == EffectType::Echo && paramsOut[1] == -1) paramsOut[1] = 60;
 				return *type;
 			};
 
@@ -848,7 +908,7 @@ const static int tickResolution = 240;
 			else if (p.first == "t")
 			{
 				const double bpm = atof(*p.second);
-				if (bpm > 0.0 && std::isfinite(bpm))
+				if (bpm > 0.0 && std::isfinite(bpm) && (behaviorVersionNumber < 130 || bpm <= 65535.0))
 					AddTimingPoint(60000.0 / bpm, currTimingPoint->numerator, currTimingPoint->denominator, currTimingPoint->tickrateOffset);
 				else
 					Logf("[KSH]Ignoring invalid BPM at %d:%d: %s", Logger::Severity::Warning,
@@ -861,11 +921,11 @@ const static int tickResolution = 240;
 			}
 			else if (p.first == "laserrange_l")
 			{
-				laserRanges[0] = 2.0f;
+				if (!laserStates[0]) laserRanges[0] = p.second == "2x" ? 2.0f : 1.0f;
 			}
 			else if (p.first == "laserrange_r")
 			{
-				laserRanges[1] = 2.0f;
+				if (!laserStates[1]) laserRanges[1] = p.second == "2x" ? 2.0f : 1.0f;
 			}
 			else if (p.first == "fx-l") // KSH 1.6
 			{
@@ -880,11 +940,13 @@ const static int tickResolution = 240;
 			else if (p.first == "fx-l_param1")
 			{
 				currentButtonEffectParams[0] = atoi(*p.second);
+                currentButtonParamMask[0] |= 1;
 				splitupHoldNotes[0] = true;
 			}
 			else if (p.first == "fx-r_param1")
 			{
 				currentButtonEffectParams[maxEffectParamsPerButtons] = atoi(*p.second);
+                currentButtonParamMask[1] |= 1;
 				splitupHoldNotes[1] = true;
 			}
 			else if (p.first == "filtertype")
@@ -897,6 +959,35 @@ const static int tickResolution = 240;
 				evt->data.effectVal = ParseFilterType(p.second);
 				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
 			}
+            // Definition snapshots keep chart-time automation separate from immutable base effects.
+            else if (p.first.find("fx:") == 0 ||
+                (p.first.find("filter:") == 0 && p.first.find(":mix") == String::npos &&
+                 p.first.find(":updateTrigger") == String::npos))
+            {
+                const bool filter = p.first.find("filter:") == 0;
+                String name, property;
+                const String option = p.first.substr(filter ? 7 : 3);
+                if (option.Split(":", &name, &property)) {
+                    auto& names = filter ? filterTypeMap : effectTypeMap;
+                    const auto* id = names.FindEffectType(name);
+                    static const Vector<String> supported = {"mix", "waveLength", "rate", "updatePeriod",
+                        "period", "pitch", "amount", "reduction", "feedbackLevel", "stage", "loFreq", "hiFreq",
+                        "chunkSize", "overWrap", "Q", "feedback", "stereoWidth", "hiCutGain", "depth", "delay", "volume", "attackTime",
+                        "holdTime", "releaseTime", "ratio", "speed", "freq", "gain", "pan"};
+                    if (id && supported.Contains(property)) {
+                        auto& definitions = filter ? automatedFilters : automatedFX;
+                        auto& definition = definitions[name];
+                        if (definition.parameters.empty()) {
+                            definition.typeName = name;
+                            definition.parameters["type"] = name;
+                        }
+                        definition.parameters[property] = p.second;
+                        auto effect = ParseCustomEffect(definition, m_switchablePaths);
+                        if (effect.type != EffectType::None && effect.type != EffectType::SwitchAudio)
+                            m_audioEffectChanges.Add({mapTime, *id, filter, effect});
+                    } else Logf("[KSH]Unsupported audio automation: %s", Logger::Severity::Warning, p.first);
+                }
+            }
 			// KSH: independent automation for named #define_filter DSPs.
 			else if (p.first.find("filter:") == 0)
 			{
@@ -932,21 +1023,16 @@ const static int tickResolution = 240;
 						Logf("[KSH]Unsupported named filter option: %s", Logger::Severity::Warning, p.first);
 				}
 			}
-			else if (p.first == "chokkakuse")
-			{
-				uint8 sound = 0;
-				if (p.second == "down") sound = 1;
-				else if (p.second == "swing") sound = 2;
-				else if (p.second == "mute") sound = 3;
-				else if (p.second != "up")
-					Logf("[KSH]Unknown chokkakuse: %s", Logger::Severity::Warning, p.second);
-				EventObjectState *evt = new EventObjectState();
-				evt->interTickIndex = tickSettingIndex;
-				evt->time = mapTime;
-				evt->key = EventKey::LaserSlamSound;
-				evt->data.byteVal = sound;
-				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
-			}
+            else if (p.first == "chokkakuse")
+            {
+                uint8 sound = 0;
+                if (p.second == "down") sound = 1;
+                else if (p.second == "swing") sound = 2;
+                else if (p.second == "mute") sound = 3;
+                else if (p.second == "up") sound = 4;
+                else Logf("[KSH]Unsupported slam sample: %s", Logger::Severity::Warning, p.second);
+                slamSounds[mapTime] = sound;
+            }
 			else if (p.first == "pfiltergain")
 			{
 				// Inser filter type change event
@@ -969,20 +1055,32 @@ const static int tickResolution = 240;
 				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
 			}
 			else if (p.first == "zoom_bottom")
-			{
-				const double value = atol(p.second.data()) / 100.0;
-				m_effects.InsertGraphValue(EffectTimeline::GraphType::ZOOM_BOTTOM, mapTime, value);
-			}
+            {
+                auto& graph = m_effects.GetGraph(EffectTimeline::GraphType::ZOOM_BOTTOM);
+                auto existing = graph.lower_bound(mapTime);
+                double value;
+                if (KSHCompatibility::ZoomValue(p.second, behaviorVersionNumber,
+                        existing != graph.end() && existing->first == mapTime, value))
+                    graph.Insert(mapTime, value / 100.0);
+            }
 			else if (p.first == "zoom_top")
-			{
-				const double value = atol(p.second.data()) / 100.0;
-				m_effects.InsertGraphValue(EffectTimeline::GraphType::ZOOM_TOP, mapTime, value);
-			}
+            {
+                auto& graph = m_effects.GetGraph(EffectTimeline::GraphType::ZOOM_TOP);
+                auto existing = graph.lower_bound(mapTime);
+                double value;
+                if (KSHCompatibility::ZoomValue(p.second, behaviorVersionNumber,
+                        existing != graph.end() && existing->first == mapTime, value))
+                    graph.Insert(mapTime, value / 100.0);
+            }
 			else if (p.first == "zoom_side")
-			{
-				const double value = atol(p.second.data()) / 100.0;
-				m_effects.InsertGraphValue(EffectTimeline::GraphType::SHIFT_X, mapTime, value);
-			}
+            {
+                auto& graph = m_effects.GetGraph(EffectTimeline::GraphType::SHIFT_X);
+                auto existing = graph.lower_bound(mapTime);
+                double value;
+                if (KSHCompatibility::ZoomValue(p.second, behaviorVersionNumber,
+                        existing != graph.end() && existing->first == mapTime, value))
+                    graph.Insert(mapTime, value / 100.0);
+            }
 			/* OLD USC MANUAL ROLL, KEPT JUST IN CASE
 			else if (p.first == "roll")
 			{
@@ -1106,16 +1204,17 @@ const static int tickResolution = 240;
 			else if (p.first == "stop")
 			{
 				// Stops will be applied after the scroll speed graph is constructed.
-				const MapTime stopDuration = Math::RoundToInt((atol(*p.second) / 192.0f) * (currTimingPoint->beatDuration) * 4);
+				const double stopDuration = std::strtod(p.second.data(), nullptr) / 192.0 * tickResolution * 4;
+                if (!std::isfinite(stopDuration) || stopDuration <= 0) continue;
 				bool isOverlappingStop = false;
 
-				if (!stops.empty() && mapTime < std::get<1>(*stops.rbegin()))
+				if (!stops.empty() && currentTick < std::get<1>(*stops.rbegin()))
 				{
 					isOverlappingStop = true;
 					std::get<2>(*stops.rbegin()) = true;
 				}
 
-				stops.Add(std::make_tuple(mapTime, mapTime + stopDuration, isOverlappingStop));
+				stops.Add(std::make_tuple(currentTick, currentTick + stopDuration, isOverlappingStop));
 			}
 			else if (p.first == "scroll_speed")
 			{
@@ -1137,16 +1236,17 @@ const static int tickResolution = 240;
 			HoldObjectState *lastHoldObject = nullptr;
 
 			auto IsHoldState = [&]() {
-				return state && state->numTicks > 0 && state->fineSnap;
+				return state && state->fineSnap;
 			};
-			auto CreateButton = [&]() {
+			auto CreateButton = [&](double endTick) {
 				if (IsHoldState())
 				{
 					HoldObjectState *obj = lastHoldObject = new HoldObjectState();
 					obj->time = TickToMapTime(state->startTick);
 					obj->index = i;
-					obj->duration = TickToMapTime(currentTick) - obj->time;
+					obj->duration = TickToMapTime(endTick) - obj->time;
 					obj->effectType = state->effectType;
+                    obj->effectParamMask = state->effectParamMask;
 					if (state->lastHoldObject)
 						state->lastHoldObject->next = obj;
 					obj->prev = state->lastHoldObject;
@@ -1173,7 +1273,7 @@ const static int tickResolution = 240;
 			// Split up multiple hold notes
 			if (i > 3 && IsHoldState() && splitupHoldNotes[i - 4])
 			{
-				CreateButton();
+				CreateButton(currentTick);
 			}
 
 			if (c == '0')
@@ -1181,13 +1281,14 @@ const static int tickResolution = 240;
 				// Terminate hold button
 				if (state)
 				{
-					CreateButton();
+					CreateButton(currentTick);
 				}
 
 				if (i >= 4)
 				{
 					// Unset effect parameters
 					currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons] = -1;
+                    currentButtonParamMask[i - 4] = 0;
 					currentButtonEffectParams[(i - 4) * maxEffectParamsPerButtons + 1] = -1;
 				}
 			}
@@ -1195,6 +1296,7 @@ const static int tickResolution = 240;
 			{
 				// Create new hold state
 				state = new TempButtonState(currentTick);
+                    if (i >= 4) state->effectParamMask = (c != '1' && c != '2') ? 3 : currentButtonParamMask[i - 4];
 				uint32 div = (uint32)block.ticks.size();
 
 				if (lastHoldObject)
@@ -1282,8 +1384,9 @@ const static int tickResolution = 240;
 								   sizeof(state->effectParams));
 						else
 						{
-							state->effectParams[0] = defaultEffectParams[state->effectType];
-							state->effectParams[1] = 0;
+							state->effectParams[0] = state->effectType >= EffectType::UserDefined0
+                                ? uint16(-1) : defaultEffectParams[state->effectType];
+                            state->effectParams[1] = state->effectType == EffectType::Echo ? 60 : uint16(-1);
 						}
 					}
 				}
@@ -1293,10 +1396,11 @@ const static int tickResolution = 240;
 				// For buttons not using the 1/32 grid
 				if (!state->fineSnap)
 				{
-					CreateButton();
+					CreateButton(currentTick);
 
 					// Create new hold state
 					state = new TempButtonState(currentTick);
+                    if (i >= 4) state->effectParamMask = (c != '1' && c != '2') ? 3 : currentButtonParamMask[i - 4];
 					uint32 div = (uint32)block.ticks.size();
 
 					if (i < 4)
@@ -1332,7 +1436,8 @@ const static int tickResolution = 240;
 
 			// Terminate last item
 			if (lastTick && state)
-				CreateButton();
+                CreateButton(currentTick + tickResolution * 4.0 * currTimingPoint->numerator /
+                    currTimingPoint->denominator / block.ticks.size());
 		}
 
 		// Set laser states
@@ -1354,7 +1459,7 @@ const static int tickResolution = 240;
 				obj->index = i;
 				obj->points[0] = state->startPosition;
 				obj->points[1] = endPos;
-				uint32 tickDuration = currentTick - state->absoluteStartTick;
+				double tickDuration = currentTick - state->absoluteStartTick;
 
 				if (laserRanges[i] > 1.0f)
 				{
@@ -1363,10 +1468,11 @@ const static int tickResolution = 240;
 				uint32 laserSlamThreshold = tickResolution / 8;
 				bool lastSlam = (state->last && (state->last->flags & LaserObjectState::flag_Instant) != 0); // Deal with super fast repeat slams
 
-				if (tickDuration <= laserSlamThreshold && (obj->points[1] != obj->points[0]))
+				if (tickDuration <= laserSlamThreshold + 1e-7 && (obj->points[1] != obj->points[0]))
 				{
 					obj->flags |= LaserObjectState::flag_Instant;
 					obj->time = TickToMapTime(state->absoluteStartTick);
+                    if (const auto* sound = slamSounds.Find(obj->time)) obj->slamSound = *sound;
 					obj->tick = state->absoluteStartTick;
 					if (state->spinType != 0)
 					{
@@ -1446,6 +1552,7 @@ const static int tickResolution = 240;
 				// Add to list of objects
 
 				assert(obj->GetRoot() != nullptr);
+                exactLaserTicks[obj] = (obj->flags & LaserObjectState::flag_Instant) ? state->absoluteStartTick : state->startTick;
 
 				m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*obj));
 
@@ -1486,11 +1593,11 @@ const static int tickResolution = 240;
 					state = nullptr;
 				}
 
-				uint32 startTick = currentTick;
+				double startTick = currentTick;
 				if (last && (last->flags & LaserObjectState::flag_Instant) != 0)
 				{
 					// Move offset to be the same as last segment, as in ksh maps there is a 1 tick delay after laser slams
-					startTick = last->tick;
+					startTick = exactLaserTicks.at(last);
 				}
 				state = new TempLaserState(startTick, currentTick, 0);
 				state->last = last; // Link together
@@ -1501,31 +1608,30 @@ const static int tickResolution = 240;
 				//) or ( = full spin
 				//> or < = quarter spin
 				//Speed is number of 192nd notes
-				if (!tick.add.empty() && (tick.add[0] == '@' || tick.add[0] == 'S'))
+				if (tick.add.size() >= 2 && (tick.add[0] == '@' || tick.add[0] == 'S'))
 				{
 					state->spinIsBounce = tick.add[0] == 'S';
 					state->spinType = tick.add[1];
 
-					String add = tick.add.substr(2);
-					if (state->spinIsBounce)
-					{
-						String duration, amplitude, frequency, decay;
+                    String add = tick.add.substr(2);
+                    auto number = [](const String& text, uint32 fallback, uint32 maximum = 65535) {
+                        if (text.empty()) return fallback;
+                        char* end = nullptr;
+                        const double value = std::strtod(text.c_str(), &end);
+                        if (end == text.c_str() || !std::isfinite(value) || value < 0 || value > maximum) return fallback;
+                        return static_cast<uint32>(value);
+                    };
+                    if (state->spinIsBounce) {
+                        String duration, amplitude, frequency, decay;
+                        add.Split(";", &duration, &amplitude);
+                        amplitude.Split(";", &amplitude, &frequency);
+                        frequency.Split(";", &frequency, &decay);
+                        state->spinDuration = number(duration, 192);
+                        state->spinBounceAmplitude = number(amplitude, 250);
+                        state->spinBounceFrequency = number(frequency, 3);
+                        state->spinBounceDecay = number(decay, 2, 2);
+                    } else state->spinDuration = number(add, 192);
 
-						add.Split(";", &duration, &amplitude);
-						amplitude.Split(";", &amplitude, &frequency);
-						frequency.Split(";", &frequency, &decay);
-
-						state->spinDuration = std::stoi(duration);
-						state->spinBounceAmplitude = std::stoi(amplitude);
-						state->spinBounceFrequency = std::stoi(frequency);
-						state->spinBounceDecay = std::stoi(decay);
-					}
-					else
-					{
-						state->spinDuration = std::stoi(add);
-						if (state->spinType == '(' || state->spinType == ')')
-							state->spinDuration = state->spinDuration;
-					}
 				}
 
 				lastLaserPointTime[i] = mapTime;
@@ -1533,14 +1639,14 @@ const static int tickResolution = 240;
 		}
 
 		lastMapTime = mapTime;
-		currentTick += static_cast<uint32>((tickResolution * 4 * currTimingPoint->numerator / currTimingPoint->denominator) / block.ticks.size());
+		currentTick += tickResolution * 4.0 * currTimingPoint->numerator / currTimingPoint->denominator / block.ticks.size();
 	}
 
 	// Apply stops
 	for (const auto& stop : stops)
 	{
-		const MapTime stopBegin = std::get<0>(stop);
-		const MapTime stopEnd = std::get<1>(stop);
+		const MapTime stopBegin = TickToMapTime(std::get<0>(stop));
+		const MapTime stopEnd = TickToMapTime(std::get<1>(stop));
 		const bool isOverlapping = std::get<2>(stop);
 
 		LineGraph& scrollSpeedGraph = m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED);

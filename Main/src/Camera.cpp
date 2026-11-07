@@ -121,7 +121,7 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	const TimingPoint& currentTimingPoint = playback.GetCurrentTimingPoint();
 	// Percentage of m_rollIntensity where camera rolls at its slowest rate
 	const float slowestTiltThreshold = 0.1f;
-	const float rollSpeed = 4;
+	const float rollSpeed = (m_kshVersion >= 0 && m_kshVersion < 121) ? 6.0f : 4.0f;
 	float speedLimit = MAX_ROLL_ANGLE * rollSpeed;
 	float actualRollTarget = 0;
 
@@ -183,7 +183,7 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 			m_slamRoll[index] = 0;
 	}
 
-	m_spinProgress = (float)(playback.GetLastTime() - m_spinStart) / m_spinDuration;
+	m_spinProgress = m_spinDuration > 0 ? (float)(playback.GetLastTime() - m_spinStart) / m_spinDuration : 2.0f;
 	// Calculate camera spin
 	// TODO(local): spins need a progress of 1
 	if (m_spinProgress < 2.0f)
@@ -216,7 +216,20 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	}
 
 	m_totalRoll = m_spinRoll + m_actualRoll;
-	m_totalOffset = (pLaneOffset * (5 * 100) / (6 * 116)) / 2.0f + m_spinBounceOffset;
+	const bool legacyZoom = m_kshVersion >= 0 && m_kshVersion < 167;
+    float renderPitch = pLanePitch, renderZoom = pLaneZoom, renderOffset = pLaneOffset;
+    if (legacyZoom) {
+        if (!m_legacyCameraInitialized) {
+            m_legacyPitch = pLanePitch; m_legacyZoom = pLaneZoom; m_legacyOffset = pLaneOffset;
+            m_legacyCameraInitialized = true;
+        }
+        const float rate = Math::Clamp(deltaTime / 0.040f, 0.0f, 1.0f);
+        m_legacyPitch += (pLanePitch - m_legacyPitch) * rate;
+        m_legacyZoom += (pLaneZoom - m_legacyZoom) * rate;
+        m_legacyOffset += (pLaneOffset - m_legacyOffset) * rate;
+        renderPitch = m_legacyPitch; renderZoom = m_legacyZoom; renderOffset = m_legacyOffset;
+    }
+    m_totalOffset = (renderOffset * (5 * 100) / (6 * 116)) / 2.0f + m_spinBounceOffset;
 
 	// Update camera shake effects
 	if (m_shakeEffect.amplitudeToBeAdded != 0)
@@ -233,7 +246,7 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	m_shakeOffset = m_shakeEffect.amplitude;
 	m_shakeEffect.guard -= deltaTime;
 
-	float lanePitch = PitchScaleFunc(pLanePitch) * pitchUnit;
+	float lanePitch = legacyZoom ? 0.0f : PitchScaleFunc(renderPitch) * pitchUnit;
 
 	// Add KSON rotation_deg after normal/manual tilt composition.
 	// Reduce very large authored rotations modulo 360 before trigonometry.
@@ -248,13 +261,24 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 		zoomDir = zoomDir.Normalized();
 
 		float zoomAmt;
-		if (pLaneZoom <= 0) zoomAmt = pow(ZOOM_POW, -pLaneZoom) - 1;
-		else zoomAmt = highwayDist * (pow(ZOOM_POW, -pow(pLaneZoom, 1.35f)) - 1);
+		if (renderZoom <= 0) zoomAmt = pow(ZOOM_POW, -renderZoom) - 1;
+		else zoomAmt = highwayDist * (pow(ZOOM_POW, -pow(renderZoom, 1.35f)) - 1);
 
 		return Transform::Translation(zoomDir * zoomAmt) * t;
 	};
 
 	track->trackOrigin = GetZoomedTransform(worldNormal);
+    if (legacyZoom) {
+        // KSM's old zoom_top displaces the far edge linearly; it does not rotate it.
+        // Normalize the reference displacement by its 599.48-unit above-line height.
+        double top = renderPitch * 100.0 / 75.0;
+        if (top <= 0) top /= 2.5;
+        const double shift = top * 100.0 / (936.0 * 13.0 / 20.0 * (1.0 - 14.0 / 1024.0));
+        Transform shear;
+        shear[5] = 1.0f + float(shift * std::cos(-0.6125));
+        shear[6] = float(-shift * std::sin(-0.6125));
+        track->trackOrigin *= shear;
+    }
 
 	critOrigin = GetZoomedTransform(GetOriginTransform(lanePitch, m_totalOffset, m_actualRoll * 360.0f + sin(m_spinRoll * Math::pi * 2) * 20 + renderKSONRotation));
 }
@@ -394,9 +418,10 @@ RenderState Camera::CreateRenderState(bool clipped)
 
 void Camera::SetTargetRoll(float target)
 {
-	auto ShouldRollDuringKeep = [](float target, float roll)
+	auto ShouldRollDuringKeep = [&](float target, float roll)
 	{
-		return (roll == 0) || (Math::Sign(roll) == Math::Sign(target) && fabsf(roll) < fabsf(target));
+		return (roll == 0) || (Math::Sign(roll) == Math::Sign(target) && fabsf(roll) < fabsf(target)) ||
+            (m_legacyKeep && target != 0 && Math::Sign(roll) != Math::Sign(target));
 	};
 
 	float slamRollTotal = m_slamRoll[0] + m_slamRoll[1];

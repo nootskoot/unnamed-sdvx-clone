@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include <Beatmap/KSHCompatibility.hpp>
 #include "Game.hpp"
 #include "Application.hpp"
 
@@ -155,6 +156,8 @@ private:
 	float m_slamVolume = 1.0;
 
 	Sample m_slamSample;
+    Sample m_kshSlamSamples[5];
+    float m_chartSlamVolume = 1.0f;
 	uint8 m_nextSlamSound = 0; // Chart one-shot sound variant; 3 = mute.
 	Sample m_clickSamples[2];
 	Sample* m_fxSamples = nullptr;
@@ -885,7 +888,9 @@ public:
 		bool slowTilt = (rollL == -1 && rollR == 1) || (rollL == 0 && rollR == 0);
 		rollL = m_camera.GetRollIgnoreTimer(0) <= 0 ? m_scoring.GetLaserRollOutput(0) : 0;
 		rollR = m_camera.GetRollIgnoreTimer(1) <= 0 ? m_scoring.GetLaserRollOutput(1) : 0;
-		m_camera.SetTargetRoll(rollL + rollR);
+		m_camera.SetKSHCompatibility(m_beatmap->GetMapSettings().kshBehaviorVersion,
+            m_beatmap->GetMapSettings().kshLegacyKeep);
+        m_camera.SetTargetRoll(rollL + rollR);
 		m_camera.SetSlowTilt(slowTilt);
 
 		// Set track zoom
@@ -1319,6 +1324,16 @@ public:
 	bool InitSFX()
 	{
 		CheckedLoad(m_slamSample = g_application->LoadSample("laser_slam"));
+        m_kshSlamSamples[0] = m_slamSample;
+        if (m_beatmap->GetMapSettings().kshBehaviorVersion >= 0) {
+            m_kshSlamSamples[1] = g_audio->CreateSample("audio/ksh/chokkaku_down.wav");
+            m_kshSlamSamples[2] = g_audio->CreateSample("audio/ksh/chokkaku_swing.wav");
+            m_kshSlamSamples[4] = g_audio->CreateSample("audio/ksh/chokkaku_up.wav");
+            for (int i : {1,2,4}) if (!m_kshSlamSamples[i]) {
+                Log("KSH slam preset missing; using skin slam", Logger::Severity::Warning);
+                m_kshSlamSamples[i] = m_slamSample;
+            }
+        }
 		CheckedLoad(m_clickSamples[0] = g_application->LoadSample("click-01"));
 		CheckedLoad(m_clickSamples[1] = g_application->LoadSample("click-02"));
 
@@ -2164,14 +2179,24 @@ public:
 		float slamSize = object->points[1] - object->points[0];
 		float direction = Math::Sign(slamSize);
 		m_camera.AddCameraShake(slamSize);
-		if (m_nextSlamSound != 3)
-			m_slamSample->Play();
-		m_nextSlamSound = 0; // chokkakuse only applies to the next slam.
+        const auto& settings = m_beatmap->GetMapSettings();
+        const bool legacyKSH = settings.kshBehaviorVersion >= 0;
+        const uint8 sound = legacyKSH ? object->slamSound : m_nextSlamSound;
+        if (sound != 3) {
+            Sample sample = legacyKSH && sound < 5 ? m_kshSlamSamples[sound] : m_slamSample;
+            if (sample) {
+                const float width = std::abs(slamSize) * ((object->flags & LaserObjectState::flag_Extended) ? 2.0f : 1.0f);
+                sample->SetVolume(m_chartSlamVolume * m_slamVolume * m_fxVolume *
+                    KSHCompatibility::SlamVolumeScale(width, settings.slamAutoVolume));
+                sample->Play();
+            }
+        }
+        m_nextSlamSound = 0;
 
 		if (object->spin.type != 0)
 		{
 			if (object->spin.type == SpinStruct::SpinType::Bounce)
-				m_camera.SetXOffsetBounce(object->GetDirection(), object->spin.duration, object->spin.amplitude, object->spin.frequency, object->spin.duration, m_playback);
+				m_camera.SetXOffsetBounce(object->GetDirection(), object->spin.duration, object->spin.amplitude, object->spin.frequency, object->spin.decay, m_playback);
 			else m_camera.SetSpin(object->GetDirection(), object->spin.duration, object->spin.type, m_playback);
 		}
 
@@ -2455,7 +2480,7 @@ public:
 		}
 		else if(key == EventKey::SlamVolume)
 		{
-			m_slamSample->SetVolume(data.floatVal * m_slamVolume * m_fxVolume);
+			m_chartSlamVolume = data.floatVal;
 		}
 		else if (key == EventKey::ChartEnd)
 		{

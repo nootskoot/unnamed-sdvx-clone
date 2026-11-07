@@ -158,6 +158,7 @@ struct ObjectTypeData_Hold : public ObjectTypeData_Button
 	// The parameter for effects that have it
 	// the maximum number of parameters is 2 (only echo uses this)
 	int16 effectParams[2] = {0};
+    uint8 effectParamMask = 0; // KSH explicit note arguments; used by automation
 
 	// Set for hold notes that are a continuation of the previous one, but with a different effect
 	TObjectState<ObjectTypeData_Hold> *next = nullptr;
@@ -219,6 +220,8 @@ struct ObjectTypeData_Laser
 	uint8 index = 0;
 	// Special options
 	uint8 flags = 0;
+    // Runtime KSH preset: 0=skin default, 1=down, 2=swing, 3=mute, 4=up.
+    uint8 slamSound = 0;
 	// Position of the laser on the track
 	float points[2];
 	// Set the to the object state that connects to this laser, if any, otherwise null

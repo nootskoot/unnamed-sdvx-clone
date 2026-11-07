@@ -39,6 +39,9 @@ public:
 	// Changes the amount of roll applied when lasers are controlled, default = 1
 	void SetRollIntensity(float val);
 	void SetRollKeep(bool rollKeep);
+    void SetKSHCompatibility(int version, bool legacyKeep) {
+        m_kshVersion = version; m_legacyKeep = legacyKeep;
+    }
 	
 	/*
 	Sets laser slam amount
@@ -136,6 +139,10 @@ public:
 	Transform critOrigin;
 
 private:
+    int m_kshVersion = -1;
+    bool m_legacyKeep = false;
+    bool m_legacyCameraInitialized = false;
+    float m_legacyPitch = 0, m_legacyZoom = 0, m_legacyOffset = 0;
 	float m_ClampRoll(float in) const;
 	// x offset
 	float m_totalOffset = 0.0f;

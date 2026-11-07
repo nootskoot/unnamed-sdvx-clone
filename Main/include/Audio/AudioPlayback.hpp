@@ -16,6 +16,8 @@ public:
 
 	// Creates a DSP matching this effect
 	DSP *CreateDSP(const TimingPoint &tp, float filterInput, uint32 sampleRate, float playbackSpeed);
+    // Update coefficients/parameters without replacing the playing DSP.
+    bool UpdateDSP(DSP* dsp, const TimingPoint& tp, float filterInput, uint32 sampleRate, float playbackSpeed);
 	// Applies the given parameters overriding some settings for this effect (depending on the effect)
 	void SetParams(DSP *dsp, AudioPlayback &playback, HoldObjectState *object);
 };
@@ -93,6 +95,13 @@ public:
 	Ref<AudioStream> GetMusic() const { return m_music; }
 
 private:
+    AudioEffect m_ResolveEffect(EffectType type, bool filter) const;
+    void m_UpdateAutomation(MapTime time);
+    std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides;
+    std::map<EffectType, MapTime> m_filterCaptureTimes;
+    MapTime m_lastCaptureTime = std::numeric_limits<MapTime>::min();
+    size_t m_automationCursor = 0;
+    MapTime m_automationTime = std::numeric_limits<MapTime>::min();
 	// Returns the track that should have effects applied to them
 	Ref<AudioStream> m_GetDSPTrack();
 	void m_CleanupDSP(class DSP *&ptr);
@@ -134,6 +143,7 @@ private:
 	class DSP *m_buttonDSPs[2] = {nullptr};
 	HoldObjectState *m_currentHoldEffects[2] = {nullptr};
 	float m_effectMix[2] = {0.0f};
+    bool m_effectEnabled[2] = {false,false};
 
 	bool m_SkipEffectIfInputIsZero();
 };

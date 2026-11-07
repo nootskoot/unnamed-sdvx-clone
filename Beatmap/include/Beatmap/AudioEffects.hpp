@@ -139,6 +139,12 @@ struct AudioEffect
 	// How much of the effect is mixed in with the source audio
 	EffectParam<float> mix = 0.0f;
 
+    // KSH granular pitch controls; zero chunk selects the native SoundTouch path.
+    EffectParam<int32> pitchChunk = 0;
+    EffectParam<float> pitchOverlap = 0.4f;
+
+
+
 	union
 	{
 		struct

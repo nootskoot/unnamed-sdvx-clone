@@ -5,6 +5,7 @@
 #include <Shared/ChartSource.hpp>
 #include <Audio/Audio.hpp>
 #include <Audio/DSP.hpp>
+#include <Beatmap/KSHFilter.hpp>
 #include <Shared/Profiling.hpp>
 
 AudioPlayback::AudioPlayback()
@@ -23,6 +24,12 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 	// Cleanup exising DSP's
 	for (auto &it : m_namedLaserFilters) m_CleanupDSP(it.second.dsp);
 	m_namedLaserFilters.clear();
+    m_fxOverrides.clear(); m_filterOverrides.clear(); m_filterCaptureTimes.clear();
+    m_automationCursor = 0;
+    m_lastCaptureTime = std::numeric_limits<MapTime>::min();
+    m_effectEnabled[0] = m_effectEnabled[1] = false;
+    m_effectMix[0] = m_effectMix[1] = 0.0f;
+    m_automationTime = std::numeric_limits<MapTime>::min();
 	m_currentHoldEffects[0] = nullptr;
 	m_currentHoldEffects[1] = nullptr;
 	m_CleanupDSP(m_buttonDSPs[0]);
@@ -84,7 +91,12 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 		return true;
 	}
 
-	if (preRender)
+	const bool hasNamedFilters = std::any_of(m_beatmap->GetObjectStates().begin(), m_beatmap->GetObjectStates().end(), [](const auto& o) {
+        if (o->type != ObjectType::Event) return false;
+        auto key = reinterpret_cast<const EventObjectState*>(o.get())->key;
+        return key == EventKey::NamedLaserFilterMix || key == EventKey::NamedLaserFilterRefresh;
+    });
+    if (preRender && !hasNamedFilters && m_beatmap->GetAudioEffectChanges().empty())
 	{
 		m_fxtrack = AudioStream::Clone(g_audio, m_music);
 		assert(m_fxtrack);
@@ -128,6 +140,80 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 }
 void AudioPlayback::Tick(float deltaTime)
 {
+    if (m_playback && m_beatmap) {
+        const auto time = m_playback->GetLastTime();
+        if (time < m_lastCaptureTime) {
+            m_filterCaptureTimes.clear();
+            std::map<EffectType, float> mixes;
+            for (const auto& o : m_beatmap->GetObjectStates()) {
+                if (o->time > time) break;
+                if (o->type != ObjectType::Event) continue;
+                const auto* e = reinterpret_cast<const EventObjectState*>(o.get());
+                if (e->key == EventKey::NamedLaserFilterRefresh && e->data.uintVal)
+                    m_filterCaptureTimes[EffectType(uint16(e->data.uintVal))] = e->time;
+                if (e->key == EventKey::NamedLaserFilterMix)
+                    mixes[EffectType(uint16(e->data.uintVal >> 16))] = (e->data.uintVal & 0xffff) / 1000.f;
+            }
+            m_CleanupDSP(m_laserDSP);
+            for (auto& entry : m_namedLaserFilters) m_CleanupDSP(entry.second.dsp);
+            m_namedLaserFilters.clear();
+            for (const auto& entry : mixes) SetNamedLaserFilterMix(entry.first, entry.second);
+        }
+        m_lastCaptureTime = time;
+    }
+    if (m_playback && m_beatmap && !m_fxtrack) m_UpdateAutomation(m_playback->GetLastTime());
+}
+AudioEffect AudioPlayback::m_ResolveEffect(EffectType type, bool filter) const
+{
+    const auto& overrides = filter ? m_filterOverrides : m_fxOverrides;
+    const auto it = overrides.find(type);
+    AudioEffect effect = it != overrides.end() ? it->second : (filter ? m_beatmap->GetFilter(type) : m_beatmap->GetEffect(type));
+    if (m_beatmap->GetMapSettings().kshBehaviorVersion >= 0 && effect.type == EffectType::PitchShift && effect.pitchChunk.Sample() == 0)
+        effect.pitchChunk = 700;
+    return effect;
+}
+void AudioPlayback::m_UpdateAutomation(MapTime time)
+{
+    const auto& changes = m_beatmap->GetAudioEffectChanges();
+    if (changes.empty()) return;
+    bool changed = time < m_automationTime;
+    if (changed) { m_automationCursor = 0; m_fxOverrides.clear(); m_filterOverrides.clear(); }
+    m_automationTime = time;
+    while (m_automationCursor < changes.size() && changes[m_automationCursor].time <= time) {
+        const auto& change = changes[m_automationCursor++];
+        (change.filter ? m_filterOverrides : m_fxOverrides)[change.type] = change.effect;
+        changed = true;
+    }
+    if (!changed) return;
+    const auto& tp = m_playback->GetCurrentTimingPoint();
+    const auto rate = m_GetDSPTrack()->GetAudioSampleRate();
+    const auto speed = GetPlaybackSpeed();
+    for (int lane = 0; lane < 2; ++lane) {
+        auto* hold = m_currentHoldEffects[lane];
+        if (!hold) continue;
+        const bool enabled = m_effectEnabled[lane];
+        m_buttonEffects[lane] = m_ResolveEffect(hold->effectType, false);
+        m_buttonEffects[lane].UpdateDSP(m_buttonDSPs[lane], tp, GetLaserFilterInput(), rate, speed);
+        if (m_buttonDSPs[lane]) {
+            auto params = *hold;
+            if (m_fxOverrides.count(hold->effectType)) {
+                if (!(hold->effectParamMask & 1)) params.effectParams[0] = -1;
+                if (!(hold->effectParamMask & 2)) params.effectParams[1] = -1;
+                params.effectType = EffectType::UserDefined0; // -1 means no explicit override
+            }
+            m_buttonEffects[lane].SetParams(m_buttonDSPs[lane], *this, &params);
+        }
+        SetEffectEnabled(lane, enabled);
+    }
+    m_laserEffect = m_ResolveEffect(m_laserEffectType, true);
+    m_laserEffect.UpdateDSP(m_laserDSP, tp, GetLaserFilterInput(), rate, speed);
+    if (m_laserDSP) m_SetLaserEffectParameter(GetLaserFilterInput());
+    for (auto& entry : m_namedLaserFilters) {
+        auto& state = entry.second;
+        state.effect = m_ResolveEffect(EffectType(entry.first), true);
+        state.effect.UpdateDSP(state.dsp, tp, 1.0f, rate, speed);
+        if (state.dsp) state.dsp->mix = state.mix;
+    }
 }
 void AudioPlayback::Play()
 {
@@ -199,7 +285,7 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 
 	DSP *&dsp = m_buttonDSPs[index];
 
-	m_buttonEffects[index] = m_beatmap->GetEffect(object->effectType);
+	m_buttonEffects[index] = m_ResolveEffect(object->effectType, false);
 
 	// Do not create DSP for SwitchAudio effect
 	if (m_buttonEffects[index].type == EffectType::SwitchAudio)
@@ -216,7 +302,13 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 
 	Logf("Set effect: %s", Logger::Severity::Debug, dsp->GetName());
 
-	m_buttonEffects[index].SetParams(dsp, *this, object);
+	auto params = *object;
+	if (m_fxOverrides.count(object->effectType)) {
+		if (!(object->effectParamMask & 1)) params.effectParams[0] = -1;
+		if (!(object->effectParamMask & 2)) params.effectParams[1] = -1;
+		params.effectType = EffectType::UserDefined0;
+	}
+	m_buttonEffects[index].SetParams(dsp, *this, &params);
 
 	// Initialize mix value to previous value
 	dsp->mix = m_effectMix[index];
@@ -230,6 +322,7 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 void AudioPlayback::SetEffectEnabled(uint32 index, bool enabled)
 {
 	assert(index <= 1);
+	m_effectEnabled[index] = enabled;
 	m_effectMix[index] = enabled ? m_buttonEffects[index].mix.Sample() : 0.0f;
 
 	if (m_buttonEffects[index].type == EffectType::SwitchAudio)
@@ -258,7 +351,7 @@ void AudioPlayback::SetLaserEffect(EffectType type)
 	{
 		m_CleanupDSP(m_laserDSP);
 		m_laserEffectType = type;
-		m_laserEffect = m_beatmap->GetFilter(type);
+		m_laserEffect = m_ResolveEffect(type, true);
 	}
 }
 bool AudioPlayback::m_SkipEffectIfInputIsZero()
@@ -279,7 +372,7 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active)
 		}
 
 		// SwitchAudio transition into other filters
-		if (m_laserSwitchable > 0)
+		if (m_laserSwitchable >= 0)
 		{
 			SetSwitchableTrackEnabled(m_laserSwitchable, false);
 			m_laserSwitchable = -1;
@@ -304,7 +397,10 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active)
 				return;
 			}
 
-			audioTrack->AddDSP(m_laserDSP);
+			m_laserDSP->startTime = m_filterCaptureTimes.count(m_laserEffectType) ? m_filterCaptureTimes.at(m_laserEffectType) : m_playback->GetLastTime();
+            m_laserDSP->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
+            m_laserDSP->chartOffset = m_beatmap->GetMapSettings().offset;
+            audioTrack->AddDSP(m_laserDSP);
 		}
 
 		// Set params
@@ -314,8 +410,8 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active)
 	}
 	else
 	{
-		if (m_laserSwitchable > 0)
-			SetSwitchableTrackEnabled(m_laserSwitchable, true);
+		if (m_laserSwitchable >= 0)
+			SetSwitchableTrackEnabled(m_laserSwitchable, false);
 
 		m_laserSwitchable = -1;
 		m_CleanupDSP(m_laserDSP);
@@ -350,19 +446,13 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 		return;
 	}
 	if (state.dsp) { state.dsp->mix = mix; return; }
-	state.effect = m_beatmap->GetFilter(type);
-	// An uninitialized biquad can silence the output; until we implement
-	// independent coefficient updates, do not create BQF named filters.
-	if (state.effect.type == EffectType::None ||
-		state.effect.type == EffectType::PeakingFilter ||
-		state.effect.type == EffectType::LowPassFilter ||
-		state.effect.type == EffectType::HighPassFilter ||
-		state.effect.type == EffectType::SwitchAudio) return;
+	state.effect = m_ResolveEffect(type, true);
+    if (state.effect.type == EffectType::None || state.effect.type == EffectType::SwitchAudio) return;
 	Ref<AudioStream> track = m_GetDSPTrack();
 	state.dsp = state.effect.CreateDSP(m_playback->GetCurrentTimingPoint(),
 		1.0f, track->GetAudioSampleRate(), GetPlaybackSpeed());
 	if (!state.dsp) return;
-	state.dsp->startTime = track->GetPosition();
+	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : m_playback->GetLastTime();
 	state.dsp->chartOffset = m_beatmap->GetMapSettings().offset;
 	state.dsp->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
 	state.dsp->mix = mix;
@@ -370,6 +460,18 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 }
 void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
 {
+    if (!m_playback) return;
+    m_filterCaptureTimes[type] = m_playback->GetLastTime();
+    // Use the authored timestamp, not the frame on which its callback arrived.
+    for (const auto& o : m_beatmap->GetObjectStates()) {
+        if (o->time > m_playback->GetLastTime()) break;
+        if (o->type != ObjectType::Event) continue;
+        const auto* e = reinterpret_cast<const EventObjectState*>(o.get());
+        if (e->key == EventKey::NamedLaserFilterRefresh && e->data.uintVal == uint32(uint16(type)))
+            m_filterCaptureTimes[type] = e->time;
+    }
+    if (type == m_laserEffectType && m_laserEffect.type == EffectType::Retrigger && m_laserDSP)
+        m_laserDSP->startTime = m_filterCaptureTimes[type];
 	const uint16 key = (uint16)type;
 	auto it = m_namedLaserFilters.find(key);
 	if (it == m_namedLaserFilters.end() || !it->second.dsp) return;
@@ -501,10 +603,33 @@ void AudioPlayback::m_CleanupDSP(DSP *&ptr)
 void AudioPlayback::m_SetLaserEffectParameter(float input)
 {
 	assert(input >= 0.0f && input <= 1.0f);
+    if (m_laserEffectType >= EffectType::UserDefined0) {
+        m_laserEffect.UpdateDSP(m_laserDSP, m_playback->GetCurrentTimingPoint(), input,
+            m_GetDSPTrack()->GetAudioSampleRate(), GetPlaybackSpeed());
+        return;
+    }
 
+    if (m_beatmap->GetMapSettings().kshBehaviorVersion >= 0) {
+        const float gain=std::max(0.f,m_laserEffectMix);
+        const float rate=m_GetDSPTrack()->GetAudioSampleRate();
+        if (m_laserEffectType == EffectType::PeakingFilter) {
+            auto p=KSHFilter::Peak(input,gain,rate);
+            static_cast<BQFDSP*>(m_laserDSP)->SetPeaking(p.q,p.frequency,p.gain);
+            m_laserDSP->mix=1; return;
+        }
+        if (m_laserEffectType == EffectType::HighPassFilter) {
+            static_cast<BQFDSP*>(m_laserDSP)->SetHighPass(2+6*gain,KSHFilter::HighFrequency(input));
+            m_laserDSP->mix=1; return;
+        }
+        if (m_laserEffectType == EffectType::LowPassFilter) {
+            static_cast<BQFDSP*>(m_laserDSP)->SetLowPass(2+3.2f*gain,KSHFilter::LowFrequency(input));
+            m_laserDSP->mix=1; return;
+        }
+    }
 	// Mix float biquad filters, these are applied manualy by changing the filter parameters (gain,q,freq,etc.)
 	float mix = m_laserEffectMix;
 	double noteDuration = m_playback->GetCurrentTimingPoint().GetWholeNoteLength();
+    if (GetPlaybackSpeed() > 0) noteDuration /= GetPlaybackSpeed();
 	uint32 actualLength = m_laserEffect.duration.Sample(input).Absolute(noteDuration);
 
 	if (input < 0.1f)

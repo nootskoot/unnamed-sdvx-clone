@@ -6,6 +6,7 @@
 void BQF::SetLowPass(float q, float freq, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	// Sampling frequency
@@ -23,6 +24,7 @@ void BQF::SetLowPass(float q, float freq, float sampleRate)
 void BQF::SetHighPass(float q, float freq, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	assert(freq < sampleRate);
@@ -40,6 +42,7 @@ void BQF::SetHighPass(float q, float freq, float sampleRate)
 void BQF::SetAllPass(float q, float freq, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	double w0 = (2 * Math::pi * freq) / sampleRate;
@@ -56,6 +59,7 @@ void BQF::SetAllPass(float q, float freq, float sampleRate)
 void BQF::SetPeaking(float q, float freq, float gain, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	double w0 = (2 * Math::pi * freq) / sampleRate;
@@ -73,6 +77,7 @@ void BQF::SetPeaking(float q, float freq, float gain, float sampleRate)
 void BQF::SetHighShelf(float q, float freq, float gain, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	double w0 = (2 * Math::pi * freq) / sampleRate;
@@ -193,7 +198,7 @@ void LimiterDSP::Process(float *out, uint32 numSamples)
 			currentGain = (1.0f / m_currentMaxVolume) * t + (1.0f - t);
 		}
 
-		float maxVolume = Math::Max(abs(out[i * 2]), abs(out[i * 2 + 1]));
+		float maxVolume = Math::Max(std::abs(out[i * 2]), std::abs(out[i * 2 + 1]));
 		out[i * 2] *= currentGain * 0.9f;
 		out[i * 2 + 1] *= currentGain * 0.9f;
 
@@ -225,14 +230,15 @@ void BitCrusherDSP::SetPeriod(float period /*= 0*/)
 }
 void BitCrusherDSP::Process(float *out, uint32 numSamples)
 {
+    if (m_period <= m_increment) { m_currentDuration=0; return; }
 	for (uint32 i = 0; i < numSamples; i++)
 	{
 		m_currentDuration += m_increment;
-		if (m_currentDuration > m_period)
+		if (m_currentDuration >= m_period)
 		{
 			m_sampleBuffer[0] = out[i * 2];
 			m_sampleBuffer[1] = out[i * 2 + 1];
-			m_currentDuration -= m_period;
+			m_currentDuration %= m_period;
 		}
 
 		out[i * 2] = m_sampleBuffer[0] * mix + out[i * 2] * (1.0f - mix);
@@ -259,7 +265,7 @@ void GateDSP::SetGating(float gating)
 	const float fadeDuration = Math::Min(0.05f, gating * 0.5f);
 	m_fadeIn = (uint32)((float)m_halfway * fadeDuration);
 	m_fadeOut = (uint32)((float)m_halfway * (1.0f - fadeDuration));
-	m_currentSample = 0;
+	if (m_length) m_currentSample %= m_length;
 }
 void GateDSP::Process(float *out, uint32 numSamples)
 {
@@ -311,12 +317,15 @@ void TapeStopDSP::SetLength(double length)
 {
 	assert(m_sampleRate > 0);
 	double flength = length / 1000.0 * m_sampleRate;
-	m_length = (uint32)flength;
+	if (m_length == (uint32)flength) return;
+    m_length = (uint32)flength;
+    m_sampleIdx = 0; m_currentSample = 0;
 	m_sampleBuffer.clear();
 	m_sampleBuffer.reserve(2 * m_length + 100);
 }
 void TapeStopDSP::Process(float *out, uint32 numSamples)
 {
+    if (!m_length) return;
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
 
@@ -386,51 +395,31 @@ void RetriggerDSP::SetMaxLength(uint32 length)
 }
 void RetriggerDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_length == 0)
-		return;
-
-	const uint32 startSample = GetStartSample();
-	const uint32 nowSample = GetCurrentSample();
-	const auto maxSample = m_audioBase->GetPCMCount();
-
-	float *pcmSource = m_audioBase->GetPCM();
-	double rateMult = (double)m_audioBase->GetSampleRate() / m_sampleRate;
-	uint32 pcmStartSample = static_cast<uint32>(lastTimingPoint * ((double)m_audioBase->GetSampleRate() / 1000.0));
-	uint32 baseStartRepeat = static_cast<uint32>(lastTimingPoint * ((double)m_audioBase->GetSampleRate() / 1000.0));
-
-	for (uint32 i = 0; i < numSamples; i++)
-	{
-		if (nowSample + i < startSample)
-		{
-			continue;
-		}
-
-		int startOffset = 0;
-		if (m_resetDuration > 0)
-		{
-			startOffset = (nowSample + i - baseStartRepeat) / (int)(m_resetDuration * rateMult);
-			startOffset = static_cast<int>(startOffset * m_resetDuration * rateMult);
-		}
-		else
-		{
-			startOffset = static_cast<int>((startSample - baseStartRepeat));
-		}
-
-		int pcmSample = static_cast<int>(pcmStartSample) + startOffset + static_cast<int>(m_currentSample * rateMult);
-		float gating = 1.0f;
-		if (m_currentSample > m_gateLength)
-			gating = 0;
-		// Sample from buffer
-		assert(static_cast<uint64>(pcmSample) < maxSample);
-		if (static_cast<uint64>(pcmSample) < maxSample) //TODO: Improve whatever is necessary to make sure this never happens
-		{
-			out[i * 2] = gating * pcmSource[pcmSample * 2] * mix + out[i * 2] * (1 - mix);
-			out[i * 2 + 1] = gating * pcmSource[pcmSample * 2 + 1] * mix + out[i * 2 + 1] * (1 - mix);
-		}
-
-		// Increase index
-		m_currentSample = (m_currentSample + 1) % m_length;
-	}
+    if (!m_length || !m_audioBase) return;
+    const float* pcm = m_audioBase->GetPCM();
+    const int64 count = static_cast<int64>(m_audioBase->GetPCMCount());
+    if (!pcm || count < 2) return;
+    const double sourceRate = m_audioBase->GetSampleRate();
+    const double step = sourceRate / m_sampleRate * std::max(0.001f, m_audioBase->PlaybackSpeed);
+    const double now = m_audioBase->GetSamplePos();
+    const double start = double(startTime) * sourceRate / 1000.0;
+    const double origin = double(lastTimingPoint) * sourceRate / 1000.0;
+    const double reset = double(m_resetDuration) * step;
+    for (uint32 i = 0; i < numSamples; ++i) {
+        const double position = now + i * step;
+        if (position < start) continue;
+        const double capture = reset > 0 ? origin + std::floor((position-origin)/reset)*reset : start;
+        const double phase = std::fmod(std::max(0.0, (position-capture)/step), double(m_length));
+        const double read = capture + phase * step;
+        const int64 index = static_cast<int64>(std::floor(read));
+        if (index < 0 || index + 1 >= count) continue;
+        const float fraction = float(read-index);
+        const float gate = phase < m_gateLength ? 1.0f : 0.0f;
+        for (int ch=0; ch<2; ++ch) {
+            const float wet = pcm[index*2+ch] + (pcm[(index+1)*2+ch]-pcm[index*2+ch])*fraction;
+            out[i*2+ch] = wet*gate*mix + out[i*2+ch]*(1-mix);
+        }
+    }
 }
 
 WobbleDSP::WobbleDSP(uint32 sampleRate) : DSP()
@@ -457,7 +446,7 @@ void WobbleDSP::Process(float *out, uint32 numSamples)
 		{
 			continue;
 		}
-		float f = abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
+		float f = std::abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
 		f = easing.Sample(f);
 		float freq = fmin + (fmax - fmin) * f;
 
@@ -506,8 +495,8 @@ void PhaserDSP::Process(float *out, uint32 numSamples)
 			continue;
 		}
 
-		float fLeft = abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
-		float fRight = abs(2.0f * fmodf((float)m_currentSample / (float)m_length + stereoWidth, 1.0f) - 1.0f);
+		float fLeft = std::abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
+		float fRight = std::abs(2.0f * fmodf((float)m_currentSample / (float)m_length + stereoWidth, 1.0f) - 1.0f);
 		float f[2] = {fLeft, fRight};
 		for (uint32 c = 0; c < 2; c++) {
 			// logarithmic interpolation
@@ -548,6 +537,7 @@ void FlangerDSP::SetDelayRange(uint32 offset, uint32 depth)
 	m_max = static_cast<uint32>(max * mult);
 	m_bufferLength = (m_max + 1) * 2;
 	m_sampleBuffer.resize(m_bufferLength);
+    m_bufferOffset %= m_bufferLength;
 }
 void FlangerDSP::SetFeedback(float feedback)
 {
@@ -563,7 +553,7 @@ void FlangerDSP::SetVolume(float volume)
 }
 void FlangerDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_bufferLength <= 0)
+	if (m_bufferLength <= 0 || m_length == 0)
 		return;
 	float *data = m_sampleBuffer.data();
 	if (data == nullptr)
@@ -622,8 +612,11 @@ EchoDSP::EchoDSP(uint32 sampleRate) : DSP()
 void EchoDSP::SetLength(double length)
 {
 	double flength = length / 1000.0 * m_sampleRate;
-	m_sampleBuffer.clear();
-	m_bufferLength = (uint32)(flength * 2);
+	const uint32 newLength = uint32(std::max(0.0, flength)) * 2;
+    if (newLength == m_bufferLength) return;
+    m_bufferOffset = 0;
+    m_sampleBuffer.clear();
+	m_bufferLength = newLength;
 	m_sampleBuffer.resize(m_bufferLength);
 	memset(m_sampleBuffer.data(), 0, sizeof(float) * m_bufferLength);
 	m_numLoops = 0;
@@ -631,7 +624,7 @@ void EchoDSP::SetLength(double length)
 void EchoDSP::Process(float *out, uint32 numSamples)
 {
 	float *data = m_sampleBuffer.data();
-	if (!data)
+	if (!data || m_bufferLength < 2)
 		return;
 
 	const uint32 startSample = GetStartSample();
@@ -675,7 +668,7 @@ void SidechainDSP::SetLength(double length)
 {
 	double flength = length / 1000.0 * m_sampleRate;
 	m_length = (uint32)flength;
-	m_time = 0;
+    m_time = m_length ? m_time % m_length : 0;
 }
 void SidechainDSP::SetAttackTime(double length)
 {
@@ -723,7 +716,7 @@ void SidechainDSP::Process(float *out, uint32 numSamples)
 			volume = 1.0f;
 		}
 		// range from 1/ratio (volume=0) to 1 (volume=1)
-		float sampleGain = mix * ((1.0f/ratio) + (1.0f - 1.0f/ratio)*volume) + (1.0f - mix);
+		float sampleGain = mix * ((1.0f/std::max(ratio, 1.0f)) + (1.0f - 1.0f/ratio)*volume) + (1.0f - mix);
 		out[i * 2 + 0] *= sampleGain;
 		out[i * 2 + 1] *= sampleGain;
 		if (++m_time > m_length)
@@ -753,12 +746,13 @@ public:
 	{
 		m_soundtouch.setChannels(2);
 		m_soundtouch.setSampleRate(sampleRate);
+        init = true;
 		m_soundtouch.setSetting(SETTING_USE_AA_FILTER, 0);
 		m_soundtouch.setSetting(SETTING_SEQUENCE_MS, 5);
 		//m_soundtouch.setSetting(SETTING_SEEKWINDOW_MS, 10);
 		//m_soundtouch.setSetting(SETTING_OVERLAP_MS, 10);
 	}
-	void Process(float *out, uint32 numSamples)
+	void Process(float *out, uint32 numSamples, float mix)
 	{
 		m_receiveBuffer.resize(numSamples * 2);
 		m_soundtouch.setPitchSemiTones(pitch);
@@ -766,7 +760,7 @@ public:
 		uint32 receivedSamples = m_soundtouch.receiveSamples(m_receiveBuffer.data(), numSamples);
 		if (receivedSamples > 0)
 		{
-			memcpy(out, m_receiveBuffer.data(), receivedSamples * sizeof(float) * 2);
+			for (uint32 i=0; i<receivedSamples*2; ++i) out[i] += (m_receiveBuffer[i]-out[i])*mix;
 		}
 	}
 };
@@ -782,8 +776,36 @@ PitchShiftDSP::~PitchShiftDSP()
 }
 void PitchShiftDSP::Process(float *out, uint32 numSamples)
 {
+    if (chunkSize > 0) {
+        const uint32 size = std::max(2u, uint32(std::clamp(chunkSize, 2, 44100) * (double(m_sampleRate)/44100.0)));
+        const uint32 capacity = std::max(8u, size*4);
+        if (m_grainBuffer.size() != capacity*2) {
+            m_grainBuffer.assign(capacity*2,0.f); m_grainCursor=0; m_grainPhase=0;
+        }
+        const double speed = std::pow(2.0, std::clamp(double(amount),-48.0,48.0)/12.0);
+        const double fade = std::clamp(double(overlap),0.001,0.5);
+        auto read = [&](double delay,int ch) {
+            double index=std::fmod(double(m_grainCursor)+capacity-delay, double(capacity));
+            if(index<0) index+=capacity;
+            const uint32 lo=uint32(index); const float t=float(index-lo);
+            return m_grainBuffer[lo*2+ch]*(1-t)+m_grainBuffer[((lo+1)%capacity)*2+ch]*t;
+        };
+        for(uint32 i=0;i<numSamples;++i) {
+            for(int ch=0;ch<2;++ch) m_grainBuffer[m_grainCursor*2+ch]=out[i*2+ch];
+            const double p=m_grainPhase, p2=std::fmod(p+0.5,1.0);
+            auto window=[&](double phase){return std::min(1.0,std::min(phase,1-phase)/fade);};
+            const double w1=window(p),w2=window(p2),sum=std::max(1e-9,w1+w2);
+            if(amount!=0 && mix!=0) for(int ch=0;ch<2;++ch) {
+                const float wet=float((read(1+p*size,ch)*w1+read(1+p2*size,ch)*w2)/sum);
+                out[i*2+ch]+=(wet-out[i*2+ch])*mix;
+            }
+            m_grainPhase=std::fmod(m_grainPhase+(1-speed)/size+1.0,1.0);
+            m_grainCursor=(m_grainCursor+1)%capacity;
+        }
+        return;
+    }
 	m_impl->pitch = Math::Clamp(amount, -48.0f, 48.0f);
 	if (!m_impl->init)
 		m_impl->Init(m_sampleRate);
-	m_impl->Process(out, numSamples);
+	m_impl->Process(out, numSamples, mix);
 }

@@ -4,6 +4,7 @@
 #include "Game.hpp"
 #include "Track.hpp"
 #include "LaserTrackBuilder.hpp"
+#include <Beatmap/KSHCompatibility.hpp>
 #include "AsyncAssetLoader.hpp"
 #include <unordered_set>
 #include <algorithm>
@@ -478,8 +479,35 @@ void Track::DrawLaserBase(RenderQueue& rq, class BeatmapPlayback& playback, cons
 	}
 }
 
+void Track::UpdateSplitMeshes()
+{
+    if (m_cachedCenterSplit == centerSplit) return;
+    m_cachedCenterSplit = centerSplit;
+    for (int side = 0; side < 2; ++side) {
+        const auto base = KSHCompatibility::SplitCrop(centerSplit, side);
+        const auto tick = KSHCompatibility::SplitCrop(centerSplit, side, 168.0f);
+        m_splitBaseVisible[side] = base.Visible();
+        m_splitTickVisible[side] = tick.Visible();
+        auto update = [&](Mesh mesh, float width, float y, float length, KSHCompatibility::Crop crop) {
+            if (!crop.Visible()) return;
+            const float half = width * 0.5f;
+            const float x = (side ? -half : 0.0f) + half * crop.first;
+            const float uvStart = (side ? 0.0f : 0.5f) + 0.5f * crop.first;
+            const float uvEnd = (side ? 0.0f : 0.5f) + 0.5f * crop.last;
+            Vector<MeshGenerators::SimpleVertex> data;
+            MeshGenerators::GenerateSimpleXYQuad(Rect(Vector2(x, y), Vector2(half * (crop.last - crop.first), length)),
+                Rect(uvStart, 0.0f, uvEnd, 1.0f), data);
+            mesh->SetData(data);
+        };
+        update(splitTrackMesh[side], trackWidth, -1, trackLength + 1, base);
+        update(splitTrackCoverMesh[side], trackWidth, -trackLength, trackLength * 2, base);
+        update(splitTrackTickMesh[side], buttonTrackWidth, 0, trackTickLength, tick);
+    }
+}
+
 void Track::DrawBase(class RenderQueue& rq)
 {
+    UpdateSplitMeshes();
 	// Base
 	MaterialParameterSet params;
 	Transform transform = trackOrigin;
@@ -490,8 +518,8 @@ void Track::DrawBase(class RenderQueue& rq)
 
 	if (centerSplit != 0.0f)
 	{
-		rq.Draw(transform * Transform::Translation({centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f}), splitTrackMesh[0], trackMaterial, params);
-		rq.Draw(transform * Transform::Translation({-centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f}), splitTrackMesh[1], trackMaterial, params);
+		if (m_splitBaseVisible[0]) rq.Draw(transform * Transform::Translation({centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f}), splitTrackMesh[0], trackMaterial, params);
+		if (m_splitBaseVisible[1]) rq.Draw(transform * Transform::Translation({-centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f}), splitTrackMesh[1], trackMaterial, params);
 	}
 	else
 	{
@@ -509,8 +537,8 @@ void Track::DrawBase(class RenderQueue& rq)
 		tickTransform *= Transform::Translation(tickPosition);
 		if (centerSplit != 0.0f)
 		{
-			rq.Draw(tickTransform * Transform::Translation({ centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackTickMesh[0], buttonMaterial, params);
-			rq.Draw(tickTransform * Transform::Translation({ -centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackTickMesh[1], buttonMaterial, params);
+			if (m_splitTickVisible[0]) rq.Draw(tickTransform * Transform::Translation({ centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackTickMesh[0], buttonMaterial, params);
+			if (m_splitTickVisible[1]) rq.Draw(tickTransform * Transform::Translation({ -centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackTickMesh[1], buttonMaterial, params);
 		}
 		else
 		{
@@ -867,6 +895,7 @@ void Track::DrawCombo(RenderQueue& rq, uint32 score, Color color, float scale)
 
 void Track::DrawTrackCover(RenderQueue& rq)
 {
+    UpdateSplitMeshes();
 	#ifndef EMBEDDED
 	if (trackCoverMaterial && trackCoverTexture)
 	{
@@ -880,8 +909,8 @@ void Track::DrawTrackCover(RenderQueue& rq)
 
 		if (centerSplit != 0.0f)
 		{
-			rq.Draw(t * Transform::Translation({ centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackCoverMesh[0], trackCoverMaterial, p);
-			rq.Draw(t * Transform::Translation({ -centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackCoverMesh[1], trackCoverMaterial, p);
+			if (m_splitBaseVisible[0]) rq.Draw(t * Transform::Translation({ centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackCoverMesh[0], trackCoverMaterial, p);
+			if (m_splitBaseVisible[1]) rq.Draw(t * Transform::Translation({ -centerSplit * 0.5f * buttonWidth, 0.0f, 0.0f }), splitTrackCoverMesh[1], trackCoverMaterial, p);
 		}
 		else
 		{

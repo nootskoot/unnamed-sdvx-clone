@@ -45,6 +45,10 @@ struct BeatmapSettings
 	MapTime previewDuration;
 
 	// Initial audio settings
+    // Runtime import metadata; deliberately not added to the legacy DB serializer.
+    int kshBehaviorVersion = -1; // -1: native KSON/default behavior
+    bool kshLegacyKeep = false;
+    bool slamAutoVolume = false;
 	float slamVolume = 1.0f;
 	float laserEffectMix = 1.0f;
 	float musicVolume = 1.0f;
@@ -72,6 +76,13 @@ public:
 	using LaneTogglePointsIterator = LaneTogglePoints::const_iterator;
 
 public:
+    struct AudioEffectChange {
+        MapTime time;
+        EffectType type;
+        bool filter;
+        AudioEffect effect;
+    };
+    const Vector<AudioEffectChange>& GetAudioEffectChanges() const { return m_audioEffectChanges; }
 	bool Load(BinaryStream& input, bool metadataOnly = false);
 	bool Load(const Resource& resource, bool metadataOnly = false);
 
@@ -215,6 +226,7 @@ public:
     }
 
 private:
+    Vector<AudioEffectChange> m_audioEffectChanges;
     std::unordered_map<const ObjectState*, VisualPath> m_visualPaths;
     std::vector<double> m_ksonBars;
     std::unique_ptr<KSONScroll> m_ksonScroll;
