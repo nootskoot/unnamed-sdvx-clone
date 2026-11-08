@@ -140,6 +140,12 @@ struct AudioEffect
 	EffectParam<float> mix = 0.0f;
 
     // KSH granular pitch controls; zero chunk selects the native SoundTouch path.
+    uint16 independentFXBus = 0;
+    bool nativeFilter = false;
+    bool nativeLegacyGain = false;
+    EffectParam<float> filterPosition = EffectParam<float>(0,1);
+    EffectParam<float> filterFreq = 50, filterFreqMax = 7900;
+    EffectParam<float> filterGain = .5f, filterBandwidth = 1.2f;
     EffectParam<int32> pitchChunk = 0;
     EffectParam<float> pitchOverlap = 0.4f;
 

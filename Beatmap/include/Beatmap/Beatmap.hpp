@@ -81,7 +81,9 @@ public:
         EffectType type;
         bool filter;
         AudioEffect effect;
+        bool inactive = false;
     };
+    const AudioEffect* GetInactiveFilter(EffectType type) const { return m_inactiveAudioFilters.Find(type); }
     const Vector<AudioEffectChange>& GetAudioEffectChanges() const { return m_audioEffectChanges; }
 	bool Load(BinaryStream& input, bool metadataOnly = false);
 	bool Load(const Resource& resource, bool metadataOnly = false);
@@ -236,6 +238,7 @@ private:
 
 	Map<EffectType, AudioEffect> m_customAudioEffects;
 	Map<EffectType, AudioEffect> m_customAudioFilters;
+    Map<EffectType, AudioEffect> m_inactiveAudioFilters;
 
 	Objects m_objectStates;
 	TimingPoints m_timingPoints;

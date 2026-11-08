@@ -1,6 +1,6 @@
 // KSON format_version=1 experimental native importer for USC.
 // Native pulse-space scrolling with millisecond gameplay judgements.
-// Audio mappings use USC DSPs; unsupported automation is reported explicitly.
+// Native audio events and parameter snapshots feed USC DSPs.
 #include "stdafx.h"
 #include "Beatmap.hpp"
 #include "json.hpp"
@@ -132,6 +132,8 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             m_settings.difficulty = uint8(3); // KSM v2 maps all custom difficulty names to index 3.
         m_settings.audioNoFX = bgm.value("filename", std::string());
         m_settings.audioFX = "";
+        m_settings.laserEffectMix = .5f;
+        m_settings.slamVolume = .5f;
         m_settings.offset = bgm.value("offset", 0);
         m_settings.musicVolume = float(bgm.value("vol", 1.0));
         m_settings.previewOffset = preview.value("offset", 0);
@@ -538,13 +540,16 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             {"freq_1","loFreq"},{"freq_2","hiFreq"},{"q","Q"},
             {"stereo_width","stereoWidth"},{"hi_cut_gain","hiCutGain"},
             {"attack_time","attackTime"},{"hold_time","holdTime"},
-            {"release_time","releaseTime"},{"filename","fileName"}};
+            {"release_time","releaseTime"},{"filename","fileName"},
+            {"feedback_level","feedbackLevel"},{"chunk_size","chunkSize"},{"overlap","overWrap"}};
         const J& effects = Member(audio,"audio_effect");
         uint32 nextEffect = uint32(EffectType::UserDefined0);
-        auto MakeEffect = [&](const J& category, const std::string& name, const J& overrides) {
+        auto MakeEffect = [&](const J& category, const std::string& name, const J& overrides, bool off = false) {
+            if(name.empty())return AudioEffect::GetDefault(EffectType::None);
+            bool customDefinition=false;
             J definition = {{"type",name},{"v",J::object()}};
             for (const auto& def : Items(category,"def"))
-                if (def.is_array() && def.size()==2 && def[0]==name) definition=def[1];
+                if (def.is_array() && def.size()==2 && def[0]==name) {definition=def[1];customDefinition=true;}
             const auto type = effectNames.find(definition.value("type", std::string()));
             if (type==effectNames.end()) {
                 Logf("[KSON] Unsupported audio effect: %s",Logger::Severity::Warning,name.c_str());
@@ -554,13 +559,62 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             legacy.typeName=name;
             legacy.parameters["type"]=type->second;
             J parameters = Member(definition,"v");
+            if (!parameters.is_object()) parameters = J::object();
+            // Native KSON defaults differ from historical USC/KSH defaults.
+            const std::string base = definition.value("type",std::string());
+            if ((base=="retrigger" || base=="gate" || base=="echo" || base=="wobble") && !parameters.contains("wave_length")) parameters["wave_length"]="0";
+            if (base=="wobble") {
+                if(!parameters.contains("freq_1")) parameters["freq_1"]="500Hz";
+                if(!parameters.contains("freq_2")) parameters["freq_2"]="20000Hz";
+            }
+            if(!parameters.contains("mix")) parameters["mix"]=base=="gate"?"0%>90%":base=="phaser"?"0%>50%":(base=="flanger"||base=="wobble")?"0%>80%":"0%>100%";
+            if(base=="bitcrusher"&&!parameters.contains("reduction"))parameters["reduction"]="0samples-30samples";
+            if(base=="tapestop"&&!parameters.contains("speed"))parameters["speed"]="50%";
+            if(base=="sidechain"&&!parameters.contains("release_time"))parameters["release_time"]="1/8";
             if (overrides.is_object()) for(auto it=overrides.begin();it!=overrides.end();++it) parameters[it.key()]=it.value();
             for(auto it=parameters.begin();it!=parameters.end();++it) {
                 const auto key=paramNames.find(it.key());
                 const std::string mapped=key==paramNames.end()?it.key():key->second;
-                legacy.parameters[mapped]=it.value().is_string()?it.value().get<std::string>():it.value().dump();
+                std::string value=it.value().is_string()?it.value().get<std::string>():it.value().dump();
+                if(off) {
+                    const auto arrow=value.find('>');
+                    if(arrow!=std::string::npos) value=value.substr(0,arrow);
+                    else {const auto dash=value.find('-',1);if(dash!=std::string::npos)value=value.substr(0,dash);}
+                }
+                legacy.parameters[mapped]=value;
             }
-            return ParseCustomEffect(legacy,m_switchablePaths);
+            AudioEffect result=ParseCustomEffect(legacy,m_switchablePaths);
+            // Parse native filter controls independently of KSH's Hz/Q fields.
+            auto range=[&](const std::string& key, float fallback, float maximum) {
+                if(!parameters.contains(key)) return EffectParam<float>(fallback,maximum);
+                std::string value=parameters[key].is_string()?parameters[key].get<std::string>():parameters[key].dump();
+                const auto arrow=value.find('>');
+                if(arrow!=std::string::npos)value=off?value.substr(0,arrow):value.substr(arrow+1);
+                const auto dash=value.find('-',1);
+                auto number=[](const std::string& text){float v=std::stof(text);if(text.find('%')!=std::string::npos)v/=100;else if(text.find("kHz")!=std::string::npos)v*=1000;return v;};
+                const float first=number(value);
+                const float last=dash==std::string::npos||off?first:number(value.substr(dash+1));
+                if(!std::isfinite(first)||!std::isfinite(last))throw std::runtime_error("Non-finite KSON effect parameter");
+                return EffectParam<float>(first,last);
+            };
+            if(base=="peaking_filter"||base=="high_pass_filter"||base=="low_pass_filter") {
+                result.nativeFilter=true;
+                result.nativeLegacyGain=!customDefinition;
+                result.filterPosition=range("v",0,off?0:1);
+                const float first=base=="peaking_filter"?50:base=="high_pass_filter"?100:15000;
+                const float last=base=="peaking_filter"?7900:base=="high_pass_filter"?2200:800;
+                result.filterFreq=range("freq",first,first);
+                result.filterFreqMax=range("freq_max",last,last);
+                result.filterGain=range("gain",.5,.5);
+                result.filterBandwidth=range("bandwidth",1.2,1.2);
+                if(base=="high_pass_filter")result.hpf.q=range("q",5,5);
+                if(base=="low_pass_filter")result.lpf.q=range("q",3.6,3.6);
+            }
+            if(base=="tapestop") {
+                auto speed=range("speed",.5,.5);
+                result.duration=EffectParam<EffectDuration>(EffectDuration(int32(160/std::max(.001f,speed.Sample(0)))),EffectDuration(int32(160/std::max(.001f,speed.Sample(1)))));
+            }
+            return result;
         };
         auto AddEvent = [&](uint32 pulse, EventKey key) {
             auto* event = new EventObjectState();
@@ -569,15 +623,21 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             lastPulse=std::max(lastPulse,pulse);
             return event;
         };
+        struct Binding { std::string name; EffectType id; J overrides; };
+        std::vector<Binding> fxBindings;
         const J& fxEffects=Member(effects,"fx");
-        for (auto named=Member(fxEffects,"long_event").begin();named!=Member(fxEffects,"long_event").end();++named) {
-            if (!named.value().is_array()) continue;
-            for(size_t lane=0;lane<named.value().size() && lane<2;++lane) {
-                for(const auto& event:named.value()[lane]) {
+        struct FXCall {std::string name; size_t lane; J event;};
+        std::vector<FXCall> calls;
+        for(auto named=Member(fxEffects,"long_event").begin();named!=Member(fxEffects,"long_event").end();++named)
+            if(named.value().is_array())for(size_t lane=0;lane<named.value().size()&&lane<2;++lane)
+                for(const auto& event:named.value()[lane])calls.push_back({named.key(),lane,event});
+        std::stable_sort(calls.begin(),calls.end(),[](const auto& a,const auto& b){return GetPulse(a.event.is_array()?a.event[0]:a.event)<GetPulse(b.event.is_array()?b.event[0]:b.event);});
+        for(const auto& call:calls) {
+            const auto& event=call.event;const auto lane=call.lane;
                     const uint32 y=GetPulse(event.is_array()?event[0]:event);
                     const J overrides=event.is_array() && event.size()>1?event[1]:J::object();
-                    const auto effect=MakeEffect(fxEffects,named.key(),overrides);
-                    if(effect.type==EffectType::None) continue;
+                    const auto effect=MakeEffect(fxEffects,call.name,overrides);
+                    if(effect.type==EffectType::None && !call.name.empty()) continue;
                     HoldObjectState* hold=nullptr;
                     const double exact=ExactTimeAt(y);
                     for(auto& object:m_objectStates) {
@@ -610,30 +670,35 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*continuation));
                         hold=continuation;
                     }
+                    if(call.name.empty()) {hold->effectType=EffectType::None;hold->effectParams[0]=hold->effectParams[1]=-1;continue;}
                     hold->effectType=EffectType(nextEffect++);
                     m_customAudioEffects[hold->effectType]=effect;
-                    // USC's SetParams expects legacy integer controls.
-                    const double whole=GetTimingPoint(hold->time,m_timingPoints.begin())->GetWholeNoteLength();
-                    auto duration=effect.duration.Sample(1);
-                    const double length=duration.Absolute(whole);
-                    hold->effectParams[0]=int16(std::clamp(std::round(length>0?whole/length:4),1.0,32767.0));
-                    if(effect.type==EffectType::Bitcrush) hold->effectParams[0]=int16(std::clamp(effect.bitcrusher.reduction.Sample(1),0,32767));
-                    if(effect.type==EffectType::TapeStop) hold->effectParams[0]=int16(std::clamp(std::round(duration.type==EffectDuration::Rate?double(duration.rate)*100:16000/std::max(1.0,length)),1.0,32767.0));
-                    if(effect.type==EffectType::PitchShift) hold->effectParams[0]=int16(std::clamp(effect.pitchshift.amount.Sample(1),-32768.0f,32767.0f));
-                    if(effect.type==EffectType::Echo) hold->effectParams[1]=int16(std::clamp(effect.echo.feedback.Sample(1)*100,0.0f,32767.0f));
-                }
-            }
+                    // The definition already carries native durations and fractional values.
+                    hold->effectParams[0]=hold->effectParams[1]=-1;
+                    hold->effectParamMask=0;
+                    fxBindings.push_back({call.name,hold->effectType,overrides});
         }
+        std::map<std::string,EffectType> laserIds;
         const J& laserEffects=Member(effects,"laser");
         for(auto named=Member(laserEffects,"pulse_event").begin();named!=Member(laserEffects,"pulse_event").end();++named) {
             const auto effect=MakeEffect(laserEffects,named.key(),J::object());
             if(effect.type==EffectType::None) continue;
             const auto id=EffectType(nextEffect++);
             m_customAudioFilters[id]=effect;
+            laserIds[named.key()]=id;
             for(const auto& event:named.value()) {
                 if(!event.is_number_integer()) continue;
                 AddEvent(GetPulse(event),EventKey::LaserEffectType)->data.effectVal=id;
             }
+        }
+        bool initialLaser=false;
+        for(auto named=Member(laserEffects,"pulse_event").begin();named!=Member(laserEffects,"pulse_event").end();++named)
+            for(const auto& event:named.value())if(event.is_number_integer()&&GetPulse(event)==0)initialLaser=true;
+        if(!initialLaser) {
+            auto id=EffectType(nextEffect++);
+            m_customAudioFilters[id]=MakeEffect(laserEffects,"peaking_filter",J::object());
+            laserIds["peaking_filter"]=id;
+            AddEvent(0,EventKey::LaserEffectType)->data.effectVal=id;
         }
         for(const auto& e:Items(Member(laserEffects,"legacy"),"filter_gain"))
             if(e.is_array() && e.size()==2) AddEvent(GetPulse(e[0]),EventKey::LaserEffectMix)->data.floatVal=e[1].get<float>();
@@ -656,10 +721,75 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     }
                 }
         }
+        const auto& laserSounds=Member(keySound,"laser");
+        m_settings.slamAutoVolume=Member(laserSounds,"legacy").value("vol_auto",false);
+        const auto& slams=Member(laserSounds,"slam_event");
+        for(auto named=slams.begin();named!=slams.end();++named) {
+            uint8 preset=0;uint16 sample=65535;
+            const auto name=named.key();
+            if(name=="slam_mute"||name=="mute")preset=3;
+            else if(name=="slam_up"||name=="up")preset=4;
+            else if(name=="slam_down"||name=="down")preset=1;
+            else if(name=="slam_swing"||name=="swing")preset=2;
+            else if(m_samplePaths.size()<255){sample=uint16(m_samplePaths.size());m_samplePaths.Add(name);}
+            for(const auto& event:named.value()) {
+                const auto time=TimeAt(GetPulse(event));
+                for(auto& o:m_objectStates)if(o->type==ObjectType::Laser && o->time==time) {
+                    auto* laser=(LaserObjectState*)o.get();
+                    if(laser->flags&LaserObjectState::flag_Instant){laser->slamSound=preset;laser->slamSample=sample;}
+                }
+            }
+        }
         for(const auto& e:Items(Member(keySound,"laser"),"vol"))
             if(e.is_array() && e.size()==2) AddEvent(GetPulse(e[0]),EventKey::SlamVolume)->data.floatVal=e[1].get<float>();
-        if(!Member(fxEffects,"param_change").empty() || !Member(laserEffects,"param_change").empty())
-            Log("[KSON] Dynamic audio parameter automation is not yet supported",Logger::Severity::Warning);
+        // Parameter-only effects are real buses: a constant mix is audible even without notes.
+        auto automation=[&](const J& category, bool laser) {
+            J changes=Member(category,"param_change");
+            if(!changes.is_object())changes=J::object();
+            for(const auto& def:Items(category,"def"))if(def.is_array()&&def.size()==2&&!changes.contains(def[0].get<std::string>()))changes[def[0].get<std::string>()]=J::object();
+            for(auto named=changes.begin();named!=changes.end();++named) {
+                const std::string name=named.key();
+                EffectType bus;
+                if(laser && laserIds.count(name))bus=laserIds[name];
+                else {bus=EffectType(nextEffect++);m_customAudioFilters[bus]=MakeEffect(category,name,J::object());if(laser)laserIds[name]=bus;}
+                m_inactiveAudioFilters[bus]=MakeEffect(category,name,J::object(),true);
+                if(!laser)for(const auto& binding:fxBindings)if(binding.name==name)m_customAudioEffects[binding.id].independentFXBus=uint16(bus);
+                std::map<uint32,J> byPulse;
+                byPulse[0]=J::object();
+                for(auto property=named.value().begin();property!=named.value().end();++property)
+                    for(const auto& point:property.value())if(point.is_array()&&point.size()==2) {
+                        const auto y=GetPulse(point[0]);
+                        if(!byPulse[y].is_object())byPulse[y]=J::object();
+                        byPulse[y][property.key()]=point[1];
+                    }
+                J cumulative=J::object();
+                for(const auto& point:byPulse) {
+                    for(auto property=point.second.begin();property!=point.second.end();++property)cumulative[property.key()]=property.value();
+                    m_audioEffectChanges.Add({TimeAt(point.first),bus,true,MakeEffect(category,name,cumulative)});
+                    m_audioEffectChanges.Add({TimeAt(point.first),bus,true,MakeEffect(category,name,cumulative,true),true});
+                    if(!laser)for(const auto& binding:fxBindings)if(binding.name==name) {
+                        J values=cumulative;
+                        for(auto v=binding.overrides.begin();v!=binding.overrides.end();++v)values[v.key()]=v.value();
+                        auto effect=MakeEffect(category,name,values);
+                        effect.independentFXBus=uint16(bus);
+                        m_audioEffectChanges.Add({TimeAt(point.first),binding.id,false,effect});
+                    }
+                    if(point.second.contains("update_trigger") && point.second["update_trigger"]=="on") {
+                        AddEvent(point.first,EventKey::NamedLaserFilterRefresh)->data.uintVal=uint16(bus);
+                        if(!laser)for(const auto& binding:fxBindings)if(binding.name==name)
+                            AddEvent(point.first,EventKey::NamedLaserFilterRefresh)->data.uintVal=uint16(binding.id);
+                    }
+                    if(point.first==0 || point.second.contains("mix")) {
+                        const auto inactive=MakeEffect(category,name,cumulative,true);
+                        const float mix=std::clamp(inactive.mix.Sample(),0.f,1.f);
+                        AddEvent(point.first,EventKey::NamedLaserFilterMix)->data.uintVal=(uint32(uint16(bus))<<16)|uint32(std::round(mix*1000));
+                    }
+                }
+            }
+        };
+        automation(fxEffects,false);
+        automation(laserEffects,true);
+        std::stable_sort(m_audioEffectChanges.begin(),m_audioEffectChanges.end(),[](const auto& a,const auto& b){return a.time<b.time;});
 
         m_ksonScroll->Build();
         m_ksonBars.clear();

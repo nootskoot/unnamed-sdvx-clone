@@ -1325,7 +1325,7 @@ public:
 	{
 		CheckedLoad(m_slamSample = g_application->LoadSample("laser_slam"));
         m_kshSlamSamples[0] = m_slamSample;
-        if (m_beatmap->GetMapSettings().kshBehaviorVersion >= 0) {
+        if (m_beatmap->GetMapSettings().kshBehaviorVersion >= 0 || m_beatmap->GetKSONScroll()) {
             m_kshSlamSamples[1] = g_audio->CreateSample("audio/ksh/chokkaku_down.wav");
             m_kshSlamSamples[2] = g_audio->CreateSample("audio/ksh/chokkaku_swing.wav");
             m_kshSlamSamples[4] = g_audio->CreateSample("audio/ksh/chokkaku_up.wav");
@@ -2180,10 +2180,11 @@ public:
 		float direction = Math::Sign(slamSize);
 		m_camera.AddCameraShake(slamSize);
         const auto& settings = m_beatmap->GetMapSettings();
-        const bool legacyKSH = settings.kshBehaviorVersion >= 0;
+        const bool legacyKSH = settings.kshBehaviorVersion >= 0 || m_beatmap->GetKSONScroll();
         const uint8 sound = legacyKSH ? object->slamSound : m_nextSlamSound;
         if (sound != 3) {
             Sample sample = legacyKSH && sound < 5 ? m_kshSlamSamples[sound] : m_slamSample;
+            if (object->slamSample < m_beatmap->GetSamplePaths().size()) sample=m_fxSamples[object->slamSample];
             if (sample) {
                 const float width = std::abs(slamSize) * ((object->flags & LaserObjectState::flag_Extended) ? 2.0f : 1.0f);
                 sample->SetVolume(m_chartSlamVolume * m_slamVolume * m_fxVolume *

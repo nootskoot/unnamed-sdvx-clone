@@ -96,8 +96,10 @@ public:
 
 private:
     AudioEffect m_ResolveEffect(EffectType type, bool filter) const;
+    AudioEffect m_ResolveInactiveEffect(EffectType type) const;
     void m_UpdateAutomation(MapTime time);
-    std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides;
+    void m_UpdateIndependentFXMix();
+    std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides, m_inactiveOverrides;
     std::map<EffectType, MapTime> m_filterCaptureTimes;
     MapTime m_lastCaptureTime = std::numeric_limits<MapTime>::min();
     size_t m_automationCursor = 0;

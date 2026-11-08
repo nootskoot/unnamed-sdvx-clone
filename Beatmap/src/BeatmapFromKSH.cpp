@@ -187,6 +187,11 @@ static MultiParam ParseParam(const String &in)
         const double ratio = denominator != 0 ? atof(*a) / denominator : 0.0;
         ret.fval = std::isfinite(ratio) ? float(ratio) : 0.0f;
 	}
+	else if (in.find("Hz") != -1)
+    {
+        ret.type = MultiParam::Float;
+        ret.fval = float(atof(*in)) * (in.find("kHz") != -1 ? 1000.f : 1.f);
+    }
 	else if (in.find("samples") != -1)
 	{
 		ret.type = MultiParam::Samples;

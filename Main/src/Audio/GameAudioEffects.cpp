@@ -3,6 +3,29 @@
 #include <Beatmap/BeatmapPlayback.hpp>
 #include <Audio/DSP.hpp>
 #include <Audio/Audio.hpp>
+#include <Beatmap/KSHFilter.hpp>
+
+namespace {
+bool ConfigureNativeFilter(DSP* dsp, const AudioEffect& effect, float input, uint32 sampleRate) {
+    if(!effect.nativeFilter) return false;
+    const float v=std::clamp(effect.filterPosition.Sample(input),0.f,1.f);
+    const float first=effect.filterFreq.Sample(input), last=effect.filterFreqMax.Sample(input);
+    float curve=v;
+    if(effect.type==EffectType::PeakingFilter)curve=(KSHFilter::Peak(v,0.5f,sampleRate).frequency-50)/7850;
+    else if(effect.type==EffectType::HighPassFilter)curve=(KSHFilter::HighFrequency(v)-100)/2100;
+    else if(effect.type==EffectType::LowPassFilter)curve=(15000-KSHFilter::LowFrequency(v))/14200;
+    const float frequency=std::clamp(first+(last-first)*std::clamp(curve,0.f,1.f),1.f,sampleRate*.49f);
+    auto* filter=static_cast<BQFDSP*>(dsp);
+    if(effect.type==EffectType::PeakingFilter) {
+        const double w=6.283185307179586*frequency/sampleRate;
+        const double bandwidth=std::clamp(effect.filterBandwidth.Sample(input),.1f,10.f);
+        const float q=float(1/(2*std::sinh(std::log(2.0)*bandwidth*.5*w/std::sin(w))));
+        filter->SetPeaking(q,frequency,KSHFilter::Peak(v,effect.filterGain.Sample(input),sampleRate).gain);
+    } else if(effect.type==EffectType::HighPassFilter) filter->SetHighPass(effect.hpf.q.Sample(input),frequency);
+    else filter->SetLowPass(effect.lpf.q.Sample(input),frequency);
+    return true;
+}
+}
 
 DSP *GameAudioEffect::CreateDSP(const TimingPoint &tp, float filterInput, uint32 sampleRate, float playbackSpeed)
 {
@@ -37,7 +60,8 @@ DSP *GameAudioEffect::CreateDSP(const TimingPoint &tp, float filterInput, uint32
 	{
 		// Initialize coefficients before attaching the DSP (also used by FX/named filters).
 		BQFDSP *bqfDSP = new BQFDSP(sampleRate);
-        if (type == EffectType::PeakingFilter)
+        if (ConfigureNativeFilter(bqfDSP, *this, filterInput, sampleRate)) {}
+        else if (type == EffectType::PeakingFilter)
             bqfDSP->SetPeaking(peaking.q.Sample(filterInput), peaking.freq.Sample(filterInput), peaking.gain.Sample(filterInput));
         else if (type == EffectType::LowPassFilter)
             bqfDSP->SetLowPass(lpf.q.Sample(filterInput), lpf.freq.Sample(filterInput));
@@ -181,7 +205,8 @@ bool GameAudioEffect::UpdateDSP(DSP* dsp, const TimingPoint &tp, float filterInp
 	{
 		// Initialize coefficients before attaching the DSP (also used by FX/named filters).
 		BQFDSP *bqfDSP = static_cast<BQFDSP*>(dsp);
-        if (type == EffectType::PeakingFilter)
+        if (ConfigureNativeFilter(bqfDSP, *this, filterInput, sampleRate)) {}
+        else if (type == EffectType::PeakingFilter)
             bqfDSP->SetPeaking(peaking.q.Sample(filterInput), peaking.freq.Sample(filterInput), peaking.gain.Sample(filterInput));
         else if (type == EffectType::LowPassFilter)
             bqfDSP->SetLowPass(lpf.q.Sample(filterInput), lpf.freq.Sample(filterInput));
