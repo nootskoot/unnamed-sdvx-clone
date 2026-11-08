@@ -24,6 +24,7 @@ public:
 	void SetAllPass(float q, float freq, float sampleRate);
 	void SetPeaking(float q, float freq, float gain, float sampleRate);
 	void SetHighShelf(float q, float freq, float gain, float sampleRate);
+    void SetLowShelf(float q, float freq, float gain, float sampleRate);
 	float Update(float in);
 private:
 	// FIR Delay buffers
@@ -262,6 +263,7 @@ private:
 	float m_stereoWidth = 0.f;
 	float m_volume = 0.f;
 
+	BQF m_feedbackShelf[2];
 	Vector<float> m_sampleBuffer;
 	uint32 m_time = 0;
 	uint32 m_bufferLength = 0;

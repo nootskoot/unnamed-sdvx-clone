@@ -93,6 +93,21 @@ void BQF::SetHighShelf(float q, float freq, float gain, float sampleRate)
 	a1 = 2 * ((A-1) - (A+1)*cw0);
 	a2 = (A+1) - (A-1)*cw0 - _2sqrtAalpha;
 }
+// RBJ audio-EQ cookbook low shelf, using the same Q convention as SetHighShelf.
+void BQF::SetLowShelf(float q, float freq, float gain, float sampleRate)
+{
+    freq = Math::Clamp(freq, 1.f, sampleRate * .49f);
+    q = Math::Max(q, .01f);
+    const double w = 2 * Math::pi * freq / sampleRate;
+    const double c = std::cos(w), A = std::pow(10., gain / 40.);
+    const double t = std::sqrt(A) * std::sin(w) / q;
+    b0 = A * ((A+1) - (A-1)*c + t);
+    b1 = 2*A * ((A-1) - (A+1)*c);
+    b2 = A * ((A+1) - (A-1)*c - t);
+    a0 = (A+1) + (A-1)*c + t;
+    a1 = -2 * ((A-1) + (A+1)*c);
+    a2 = (A+1) + (A-1)*c - t;
+}
 float BQF::Update(float in)
 {
 	float filtered =
@@ -483,8 +498,12 @@ void PhaserDSP::SetStage(uint32 stage)
 }
 void PhaserDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_length == 0)
-		return;
+    if (m_length == 0) return;
+	if (m_stage == 0 || mix == 0) {
+        if (numSamples) { za[0]=out[(numSamples-1)*2]; za[1]=out[(numSamples-1)*2+1]; }
+        if (m_length) m_currentSample = (m_currentSample + numSamples) % m_length;
+        return;
+    }
 
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
@@ -502,8 +521,8 @@ void PhaserDSP::Process(float *out, uint32 numSamples)
 			continue;
 		}
 
-		float fLeft = std::abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
-		float fRight = std::abs(2.0f * fmodf((float)m_currentSample / (float)m_length + stereoWidth, 1.0f) - 1.0f);
+		float fLeft = std::abs(2.0f * (((float)m_currentSample / (float)m_length)) - 1.0f);
+		float fRight = std::abs(2.0f * fmodf(((float)m_currentSample / (float)m_length) + stereoWidth, 1.0f) - 1.0f);
 		float f[2] = {fLeft, fRight};
 		for (uint32 c = 0; c < 2; c++) {
 			// logarithmic interpolation
@@ -514,19 +533,18 @@ void PhaserDSP::Process(float *out, uint32 numSamples)
 				output = m_apf[j][c].Update(output);
 			}
 			za[c] = output;
-			// effect strongest when mix = 0.5
-			output = (mix/2) * output + (1-mix/2) * out[i * 2 + c];
-			float shelved = m_hiShelf[c].Update(output);
-			out[i * 2 + c] = mix * shelved + (1-mix) * output;
+            // KSM applies the high-cut to wet audio only, then mixes at mix/2.
+            const float wet = m_hiShelf[c].Update(output);
+            out[i * 2 + c] += (wet - out[i * 2 + c]) * (mix * .5f);
 		}
-		m_currentSample++;
-		m_currentSample %= m_length;
+		if (m_length) { m_currentSample++; m_currentSample %= m_length; }
 	}
 }
 
 FlangerDSP::FlangerDSP(uint32 sampleRate) : DSP()
 {
 	SetSampleRate(sampleRate);
+    for (auto& shelf : m_feedbackShelf) shelf.SetLowShelf(.5f, 250.f, -20.f, float(sampleRate));
 }
 void FlangerDSP::SetLength(double length)
 {
@@ -590,25 +608,22 @@ void FlangerDSP::Process(float *out, uint32 numSamples)
 		int32 samplePosRight = ((int)m_bufferOffset - (int)dRight * 2 + 1) % (int)m_bufferLength;
 		if (samplePosRight < 0) samplePosRight = m_bufferLength + samplePosRight;
 
-		// Inject new sample
-		data[m_bufferOffset + 0] = Math::Clamp(
-			(m_feedback * data[samplePosLeft] + out[i * 2]) * (mix * m_volume + (1.f - mix)), -1.f,
-			1.f);
-		data[m_bufferOffset + 1] = Math::Clamp(
-			(m_feedback * data[samplePosRight] + out[i * 2 + 1]) * (mix * m_volume + (1.f - mix)),
-			-1.f, 1.f);
-
-		// Apply delay
-		out[i * 2] = Math::Clamp(
-			(mix * data[samplePosLeft] + out[i * 2]) * (mix * m_volume + (1.f - mix)), -1.f, 1.f);
-		out[i * 2 + 1] = Math::Clamp(
-			(mix * data[samplePosRight] + out[i * 2 + 1]) * (mix * m_volume + (1.f - mix)), -1.f,
-			1.f);
+        // Read before writing: a zero delay can address the write slot.
+        const float delayed[2] = { data[samplePosLeft], data[samplePosRight] };
+        const float gain = 1.f + mix * (m_volume - 1.f);
+        for (uint32 channel = 0; channel < 2; ++channel) {
+            const float dry = out[i * 2 + channel];
+            // KSM's feedback path removes low-frequency buildup. Do not
+            // hard-clip the effect here; output limiting belongs to the mixer.
+            data[m_bufferOffset + channel] = m_feedbackShelf[channel].Update(
+                (dry + m_feedback * delayed[channel]) * gain);
+            out[i * 2 + channel] = (dry + mix * delayed[channel]) * gain;
+        }
 
 		m_bufferOffset += 2;
 		if (m_bufferOffset >= m_bufferLength)
 			m_bufferOffset = 0;
-		m_time++;
+		if (m_length) m_time++;
 	}
 }
 

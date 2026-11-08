@@ -538,7 +538,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         const std::map<std::string, std::string> paramNames = {
             {"wave_length","waveLength"},{"update_period","updatePeriod"},
             {"freq_1","loFreq"},{"freq_2","hiFreq"},{"q","Q"},
-            {"stereo_width","stereoWidth"},{"hi_cut_gain","hiCutGain"},
+            {"vol","volume"},{"stereo_width","stereoWidth"},{"hi_cut_gain","hiCutGain"},
             {"attack_time","attackTime"},{"hold_time","holdTime"},
             {"release_time","releaseTime"},{"filename","fileName"},
             {"feedback_level","feedbackLevel"},{"chunk_size","chunkSize"},{"overlap","overWrap"}};
