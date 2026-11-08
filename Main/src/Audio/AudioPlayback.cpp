@@ -26,6 +26,7 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 	m_namedLaserFilters.clear();
     m_fxOverrides.clear(); m_filterOverrides.clear(); m_inactiveOverrides.clear(); m_filterCaptureTimes.clear();
     m_automationCursor = 0;
+    m_automationTimingTime = std::numeric_limits<MapTime>::min();
     m_lastCaptureTime = std::numeric_limits<MapTime>::min();
     m_effectEnabled[0] = m_effectEnabled[1] = false;
     m_effectMix[0] = m_effectMix[1] = 0.0f;
@@ -178,11 +179,18 @@ AudioEffect AudioPlayback::m_ResolveInactiveEffect(EffectType type) const {
     if(auto* effect=m_beatmap->GetInactiveFilter(type))return *effect;
     return m_ResolveEffect(type,true);
 }
+void AudioPlayback::m_ConfigureGateClock(DSP* dsp, const AudioEffect& effect) {
+    if (dsp && effect.type == EffectType::Gate && m_beatmap->GetKSONScroll())
+        static_cast<GateDSP*>(dsp)->SetMeasureTimes(m_beatmap->GetKSONBarTimes(), m_playback->audioOffset);
+}
 void AudioPlayback::m_UpdateAutomation(MapTime time)
 {
     const auto& changes = m_beatmap->GetAudioEffectChanges();
     if (changes.empty()) return;
     bool changed = time < m_automationTime;
+    const auto timingTime = m_playback->GetCurrentTimingPoint().time;
+    const bool timingChanged = timingTime != m_automationTimingTime;
+    m_automationTimingTime = timingTime;
     if (changed) { m_automationCursor = 0; m_fxOverrides.clear(); m_filterOverrides.clear(); m_inactiveOverrides.clear(); }
     m_automationTime = time;
     while (m_automationCursor < changes.size() && changes[m_automationCursor].time <= time) {
@@ -190,7 +198,7 @@ void AudioPlayback::m_UpdateAutomation(MapTime time)
         (change.inactive ? m_inactiveOverrides : change.filter ? m_filterOverrides : m_fxOverrides)[change.type] = change.effect;
         changed = true;
     }
-    if (!changed) return;
+    if (!changed && !timingChanged) return;
     const auto& tp = m_playback->GetCurrentTimingPoint();
     const auto rate = m_GetDSPTrack()->GetAudioSampleRate();
     const auto speed = GetPlaybackSpeed();
@@ -335,6 +343,7 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 	dsp->lastTimingPoint = playback.GetCurrentTimingPoint().time;
 
 	// Add the DSP to the track
+    m_ConfigureGateClock(dsp, m_buttonEffects[index]);
 	audioTrack->AddDSP(dsp);
 }
 void AudioPlayback::SetEffectEnabled(uint32 index, bool enabled)
@@ -437,7 +446,8 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active)
 			m_laserDSP->startTime = m_filterCaptureTimes.count(m_laserEffectType) ? m_filterCaptureTimes.at(m_laserEffectType) : m_playback->GetLastTime();
             m_laserDSP->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
             m_laserDSP->chartOffset = m_beatmap->GetMapSettings().offset;
-            audioTrack->AddDSP(m_laserDSP);
+            m_ConfigureGateClock(m_laserDSP, m_laserEffect);
+			audioTrack->AddDSP(m_laserDSP);
 		}
 
 		// Set params
@@ -493,6 +503,7 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 	state.dsp->chartOffset = m_beatmap->GetMapSettings().offset;
 	state.dsp->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
 	state.dsp->mix = mix;
+	m_ConfigureGateClock(state.dsp, state.effect);
 	track->AddDSP(state.dsp);
     m_UpdateIndependentFXMix();
 }

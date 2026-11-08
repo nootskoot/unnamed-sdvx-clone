@@ -199,19 +199,21 @@ void LimiterDSP::Process(float *out, uint32 numSamples)
 		}
 
 		float maxVolume = Math::Max(std::abs(out[i * 2]), std::abs(out[i * 2 + 1]));
-		out[i * 2] *= currentGain * 0.9f;
-		out[i * 2 + 1] *= currentGain * 0.9f;
 
 		float currentMax = 1.0f / currentGain;
 		if (maxVolume > currentMax)
 		{
 			m_currentMaxVolume = maxVolume;
 			m_currentReleaseTimer = 0.0f;
+            currentGain = 1.0f / maxVolume;
 		}
 		else
 		{
 			m_currentReleaseTimer += secondsPerSample;
 		}
+        // Apply the new peak reduction to this frame, not the next one.
+        out[i * 2] *= currentGain * 0.9f;
+        out[i * 2 + 1] *= currentGain * 0.9f;
 	}
 }
 
@@ -277,12 +279,24 @@ void GateDSP::Process(float *out, uint32 numSamples)
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
 
+    const bool chartClock = !m_measureTimes.empty() && m_audioBase;
+    const double sourceRate = chartClock ? m_audioBase->GetSampleRate() : m_sampleRate;
+    const double speed = chartClock ? std::max(.001f, m_audioBase->PlaybackSpeed) : 1.0;
+    const double nowMs = currentSample * 1000.0 / sourceRate - m_clockOffset;
+    auto measure = std::upper_bound(m_measureTimes.begin(), m_measureTimes.end(), nowMs);
 	for (uint32 i = 0; i < numSamples; i++)
 	{
 		if (currentSample + i < startSample)
 		{
 			continue;
 		}
+        if (chartClock) {
+            const double time = nowMs + i * speed * 1000.0 / m_sampleRate;
+            while (measure != m_measureTimes.end() && *measure <= time) ++measure;
+            const double origin = measure == m_measureTimes.begin() ? m_measureTimes.front() : *std::prev(measure);
+            const double elapsed = std::max(0.0, (time-origin) * m_sampleRate / (1000.0*speed));
+            m_currentSample = uint32(std::fmod(elapsed, double(m_length)));
+        }
         float c = m_currentSample < m_halfway ? 1.0f : 0.0f;
         if (m_fadeIn != 0) {
             if (m_currentSample < m_halfway && m_currentSample > m_fadeOut)

@@ -98,6 +98,8 @@ private:
     AudioEffect m_ResolveEffect(EffectType type, bool filter) const;
     AudioEffect m_ResolveInactiveEffect(EffectType type) const;
     void m_UpdateAutomation(MapTime time);
+    void m_ConfigureGateClock(class DSP* dsp, const AudioEffect& effect);
+    MapTime m_automationTimingTime = std::numeric_limits<MapTime>::min();
     void m_UpdateIndependentFXMix();
     std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides, m_inactiveOverrides;
     std::map<EffectType, MapTime> m_filterCaptureTimes;

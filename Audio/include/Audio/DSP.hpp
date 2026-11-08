@@ -3,6 +3,7 @@
 */
 #pragma once
 #include "AudioBase.hpp"
+#include <vector>
 #include <Shared/Interpolation.hpp>
 
 // Biquad Filter
@@ -118,6 +119,10 @@ public:
 	// The amount of time for a single cycle in samples
 	void SetLength(double length);
 	void SetGating(float gating);
+    // Native KSON gates follow the chart clock, including while bypassed.
+    void SetMeasureTimes(const std::vector<double>& times, double audioOffset = 0) {
+        m_measureTimes = times; m_clockOffset = audioOffset;
+    }
 
 	// Low volume
 	// Dry leakage is controlled by mix; a fully wet closed gate is silent.
@@ -128,6 +133,8 @@ public:
 	virtual const char *GetName() const { return "GateDSP"; }
 
 private:
+	std::vector<double> m_measureTimes;
+    double m_clockOffset = 0;
 	float m_gating = 0.5f;
 	uint32 m_length = 0;
 	uint32 m_fadeIn = 0;  // Fade In mark

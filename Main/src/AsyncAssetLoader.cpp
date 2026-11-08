@@ -136,6 +136,8 @@ bool AsyncAssetLoader::Finalize()
 		{
 			Logf("[AsyncLoad] Finalize failed on %s", Logger::Severity::Error, ld->name);
 			success = false;
+            // Later finalizers can depend on the material that just failed.
+            break;
 		}
 	}
 

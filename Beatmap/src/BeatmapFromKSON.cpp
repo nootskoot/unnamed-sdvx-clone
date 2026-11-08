@@ -793,12 +793,14 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
 
         m_ksonScroll->Build();
         m_ksonBars.clear();
+        m_ksonBarTimes.clear();
         for (auto sig=signatureAtPulse.begin(); sig!=signatureAtPulse.end(); ++sig) {
             const uint64_t stop=std::next(sig)==signatureAtPulse.end()?uint64_t(lastPulse)+1:std::next(sig)->first;
             const uint32 step=MeasurePulses(sig->second.first,sig->second.second);
             for(uint64_t y=sig->first;y<stop;y+=step) {
                 if(m_ksonBars.size()>=1000000) throw std::runtime_error("Too many KSON measure lines");
                 m_ksonBars.push_back(m_ksonScroll->PositionAtPulse(double(y)));
+                m_ksonBarTimes.push_back(ExactTimeAt(uint32(y)));
             }
         }
         for (const auto& obj : m_objectStates) {

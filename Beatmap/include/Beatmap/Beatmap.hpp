@@ -215,6 +215,7 @@ public:
         return it == m_visualPaths.end() ? empty : it->second;
     }
     const std::vector<double>& GetKSONBars() const { return m_ksonBars; }
+    const std::vector<double>& GetKSONBarTimes() const { return m_ksonBarTimes; }
     const KSONScroll* GetKSONScroll() const { return m_ksonScroll.get(); }
     std::pair<double, double> GetVisualTimes(const ObjectState* obj) const
     {
@@ -231,6 +232,7 @@ private:
     Vector<AudioEffectChange> m_audioEffectChanges;
     std::unordered_map<const ObjectState*, VisualPath> m_visualPaths;
     std::vector<double> m_ksonBars;
+    std::vector<double> m_ksonBarTimes;
     std::unique_ptr<KSONScroll> m_ksonScroll;
     std::unordered_map<const ObjectState*, std::pair<double,double>> m_visualTimes;
 	bool m_ProcessKShootMap(BinaryStream& input, bool metadataOnly);
