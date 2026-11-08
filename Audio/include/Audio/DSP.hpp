@@ -120,7 +120,8 @@ public:
 	void SetGating(float gating);
 
 	// Low volume
-	float low = 0.1f;
+	// Dry leakage is controlled by mix; a fully wet closed gate is silent.
+	float low = 0.0f;
 
 	virtual void Process(float *out, uint32 numSamples);
 	[[nodiscard]]

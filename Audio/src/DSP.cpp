@@ -262,14 +262,16 @@ void GateDSP::SetGating(float gating)
 	float flength = (float)m_length;
 	m_gating = gating;
 	m_halfway = (uint32)(flength * gating);
-	const float fadeDuration = Math::Min(0.05f, gating * 0.5f);
-	m_fadeIn = (uint32)((float)m_halfway * fadeDuration);
-	m_fadeOut = (uint32)((float)m_halfway * (1.0f - fadeDuration));
+    // Keep both ramps inside their respective on/off windows. Endpoints
+    // (fully closed/open) have no ramps and must never divide by zero.
+    m_fadeIn = std::min({uint32(flength * 0.05f), m_halfway / 2,
+        (m_length - m_halfway) / 2});
+    m_fadeOut = m_halfway - m_fadeIn;
 	if (m_length) m_currentSample %= m_length;
 }
 void GateDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_length < 2)
+	if (m_length == 0)
 		return;
 
 	const uint32 startSample = GetStartSample();
@@ -281,22 +283,13 @@ void GateDSP::Process(float *out, uint32 numSamples)
 		{
 			continue;
 		}
-		float c = 1.0f;
-		if (m_currentSample < m_halfway)
-		{
-			// Fade out before silence
-			if (m_currentSample > m_fadeOut)
-				c = 1 - (float)(m_currentSample - m_fadeOut) / (float)m_fadeIn;
-		}
-		else
-		{
-			uint32 t = m_currentSample - m_halfway;
-			// Fade in again
-			if (t > m_fadeOut)
-				c = (float)(t - m_fadeOut) / (float)m_fadeIn;
-			else
-				c = 0.0f;
-		}
+        float c = m_currentSample < m_halfway ? 1.0f : 0.0f;
+        if (m_fadeIn != 0) {
+            if (m_currentSample < m_halfway && m_currentSample > m_fadeOut)
+                c = float(m_halfway - m_currentSample) / float(m_fadeIn);
+            else if (m_currentSample >= m_length - m_fadeIn)
+                c = float(m_currentSample - (m_length - m_fadeIn)) / float(m_fadeIn);
+        }
 
 		// Multiply volume
 		c = (c * (1 - low) + low); // Range [low, 1]

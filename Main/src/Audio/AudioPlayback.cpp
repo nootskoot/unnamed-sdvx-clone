@@ -382,6 +382,9 @@ void AudioPlayback::SetLaserEffect(EffectType type)
 }
 bool AudioPlayback::m_SkipEffectIfInputIsZero()
 {
+    // Native parameters decide the endpoint response. A reversed v range can
+    // be strongest at zero; constant/custom filters may also be audible there.
+    if (m_beatmap && m_beatmap->GetKSONScroll()) return false;
 	return m_laserEffect.type == EffectType::PeakingFilter || m_laserEffect.type == EffectType::HighPassFilter
 		|| m_laserEffect.type == EffectType::LowPassFilter || m_laserEffect.type == EffectType::PitchShift
 		|| m_laserEffect.type == EffectType::Bitcrush;
