@@ -1,5 +1,11 @@
 #include "stdafx.h"
 #include "MapDatabase.hpp"
+#include "FavTableCatalog.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
+#include <vector>
 #include "Database.hpp"
 #include "Beatmap.hpp"
 #include "TinySHA1.hpp"
@@ -84,6 +90,7 @@ public:
 	Map<int32, ChallengeIndex*> m_challenges;
 	Map<int32, PracticeSetupIndex*> m_practiceSetups;
 	Vector<TableIndex> m_tables;
+	std::string m_favSignature;
 	Vector<PackIndex> m_packs;
 
 	Map<String, ChartIndex*> m_chartsByHash;
@@ -828,6 +835,7 @@ public:
 
 	const Vector<TableIndex>& GetTables() const
 	{
+		const_cast<MapDatabase_Impl*>(this)->m_RefreshLocalFavTables();
 		return m_tables;
 	}
 	const Vector<PackIndex>& GetPacks() const
@@ -1281,6 +1289,7 @@ public:
 		}
 		m_database.Exec("END");
 
+		m_RefreshLocalFavTables(true);
 		// Fire events
 		if(!removeChartEvents.empty())
 		{
@@ -1733,6 +1742,116 @@ private:
 			"settings TEXT"
 			")");
 	}
+
+    // Local .fav files are read-only difficulty lists, not folder-wide favorites.
+    // They join USC's existing TableIndex interface; no schema changes or chart copies.
+    void m_RefreshLocalFavTables(bool force = false)
+    {
+        namespace fs = std::filesystem;
+        const fs::path favDir = fs::u8path(Path::Absolute("fav-tables").c_str());
+        std::vector<fs::path> favFiles;
+        std::error_code ec;
+        if (fs::is_directory(favDir, ec))
+        {
+            for (const auto& entry : fs::directory_iterator(favDir,
+                    fs::directory_options::skip_permission_denied, ec))
+            {
+                if (ec) break;
+                if (!entry.is_regular_file(ec)) continue;
+                std::string extension = entry.path().extension().u8string();
+                for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (extension == ".fav") favFiles.push_back(entry.path());
+            }
+        }
+        std::sort(favFiles.begin(), favFiles.end());
+        std::string signature;
+        for (const auto& file : favFiles)
+        {
+            signature += file.u8string();
+            const auto stamp = fs::last_write_time(file, ec);
+            if (!ec) signature += std::to_string(stamp.time_since_epoch().count());
+            ec.clear();
+            const auto size = fs::file_size(file, ec);
+            if (!ec) signature += std::to_string(size);
+            ec.clear();
+            signature.push_back('\n');
+        }
+        if (!force && signature == m_favSignature) return;
+        m_favSignature = signature;
+
+        // Drop only previously materialized .fav tables, not installed tables.
+        m_tables.erase(std::remove_if(m_tables.begin(), m_tables.end(),
+            [](const TableIndex& t) { return t.url.rfind("fav://local/", 0) == 0; }),
+            m_tables.end());
+        if (favFiles.empty()) return;
+
+        std::vector<usc_fav::ChartRecord> chartRecords;
+        chartRecords.reserve(m_charts.size());
+        for (const auto& record : m_charts)
+        {
+            const ChartIndex* chart = record.second;
+            if (chart && chart->backbeat_bundle_id.empty() && !chart->path.empty())
+                chartRecords.push_back({static_cast<std::uint64_t>(chart->id),
+                    fs::u8path(chart->path.c_str())});
+        }
+        std::vector<fs::path> songRoots;
+        for (const auto& root : m_searchPaths)
+            songRoots.push_back(fs::u8path(root.c_str()));
+
+        usc_fav::Catalog catalog;
+        catalog.Refresh({favDir}, songRoots, chartRecords);
+        for (const auto& source : catalog.Tables())
+        {
+            TableIndex table;
+            table.url = "fav://local/" + source.name;
+            table.name = "KSM " + source.name;
+            // Human-readable .fav label; keep stable fav://local/ table URL and name.
+            std::string friendlyName = source.name;
+            for (std::size_t i = 0; i < friendlyName.size(); ++i)
+            {
+                if (friendlyName[i] == '_')
+                {
+                    friendlyName[i] = ' ';
+                    if (i + 1 < friendlyName.size() &&
+                        friendlyName[i + 1] >= 'a' && friendlyName[i + 1] <= 'z')
+                        friendlyName[i + 1] = static_cast<char>(friendlyName[i + 1] - ('a' - 'A'));
+                }
+            }
+            // KSM OS levels are named os10, os10_unique, etc.
+            const bool isOsLevel = friendlyName.size() > 2 &&
+                (friendlyName[0] == 'o' || friendlyName[0] == 'O') &&
+                (friendlyName[1] == 's' || friendlyName[1] == 'S') &&
+                friendlyName[2] >= '0' && friendlyName[2] <= '9';
+            TableSectionIndex section;
+            if (isOsLevel)
+            {
+                table.symbol = "OS";
+                section.name = friendlyName.substr(2);
+            }
+            else
+            {
+                // For generic .fav lists, show one clean title with no double prefix.
+                if (!friendlyName.empty() && friendlyName[0] >= 'a' && friendlyName[0] <= 'z')
+                    friendlyName[0] = static_cast<char>(friendlyName[0] - ('a' - 'A'));
+                table.symbol = friendlyName;
+                section.name = "";
+            }
+            for (const auto& entry : source.entries)
+                if (entry.matched && entry.chartId <= INT32_MAX)
+                    section.chartIds.Add(static_cast<int32>(entry.chartId));
+            table.levels.push_back(std::move(section));
+            m_tables.push_back(std::move(table));
+            Logf("[FAV] %s: %d/%d charts matched, %d missing, %d ambiguous",
+                 Logger::Severity::Info, source.name.c_str(),
+                 static_cast<int>(source.chartIds.size()),
+                 static_cast<int>(source.entries.size()),
+                 static_cast<int>(source.missing), static_cast<int>(source.ambiguous));
+        }
+        // Full paths of missing/ambiguous entries are available in the diagnostics.
+        for (const auto& diagnostic : catalog.Diagnostics())
+            Logf("[FAV] %s", Logger::Severity::Warning, diagnostic.c_str());
+    }
+
 	void m_LoadInitialData()
 	{
 		assert(!m_searching);
@@ -1965,6 +2084,7 @@ private:
 				section.chartIds.Add(chartId);
 		}
 
+		m_RefreshLocalFavTables(true);
 		DBStatement packScan = m_database.Query(
 			"SELECT pack_url,pack_name,chart_id FROM PackCharts "
 			"ORDER BY pack_name,pack_url,chart_index");

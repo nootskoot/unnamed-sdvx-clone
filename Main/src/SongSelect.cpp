@@ -684,15 +684,18 @@ public:
 
 		for (const TableIndex& table : m_mapDB->GetTables())
 		{
+			const bool isKsmFav = table.url.find("fav://local/") == 0;
+			const String tablePrefix = isKsmFav ? "KSM FAV: " : "Table: ";
+
 			String symbol = table.symbol.empty() ? table.name : table.symbol;
-			String sortPrefix = "Table: " + table.name;
+			String sortPrefix = tablePrefix + table.name;
 			for (size_t i = 0; i < table.levels.size(); i++)
 				updateChartSet("table:level:" + table.url + ":" + std::to_string(i),
-					"Table: " + symbol + table.levels[i].name,
+					tablePrefix + symbol + table.levels[i].name,
 					sortPrefix + Utility::Sprintf("/1/%08d", (int)i), FilterType::Table, table.levels[i].chartIds);
 			for (size_t i = 0; i < table.folders.size(); i++)
 				updateChartSet("table:folder:" + table.url + ":" + std::to_string(i),
-					"Table: " + symbol + " (" + table.folders[i].name + ")",
+					tablePrefix + symbol + " (" + table.folders[i].name + ")",
 					sortPrefix + Utility::Sprintf("/2/%08d", (int)i), FilterType::Table, table.folders[i].chartIds);
 		}
 		for (const PackIndex& pack : m_mapDB->GetPacks())

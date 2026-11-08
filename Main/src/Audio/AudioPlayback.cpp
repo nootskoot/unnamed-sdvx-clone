@@ -160,6 +160,9 @@ void AudioPlayback::Tick(float deltaTime)
             for (auto& entry : m_namedLaserFilters) m_CleanupDSP(entry.second.dsp);
             m_namedLaserFilters.clear();
             for (const auto& entry : mixes) SetNamedLaserFilterMix(entry.first, entry.second);
+            for (const auto& entry : m_filterCaptureTimes)
+                if (!mixes.count(entry.first) && m_ResolveInactiveEffect(entry.first).type == EffectType::Retrigger)
+                    SetNamedLaserFilterMix(entry.first, 0.f);
         }
         m_lastCaptureTime = time;
     }
@@ -407,7 +410,7 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
             m_beatmap->GetMapSettings().peakingFilterDelay,eligibleLanes,input);
     }
     auto independent=m_namedLaserFilters.find(uint16(m_laserEffectType));
-    if(independent!=m_namedLaserFilters.end() && independent->second.dsp && independent->second.mix>0) {
+    if(independent!=m_namedLaserFilters.end() && independent->second.dsp && (independent->second.mix>0 || independent->second.effect.type==EffectType::Retrigger)) {
         m_CleanupDSP(m_laserDSP);
         GameAudioEffect effect=active?m_ResolveEffect(m_laserEffectType,true):m_ResolveInactiveEffect(m_laserEffectType);
         effect.UpdateDSP(independent->second.dsp,m_playback->GetCurrentTimingPoint(),active?input:0.f,m_GetDSPTrack()->GetAudioSampleRate(),GetPlaybackSpeed());
@@ -484,7 +487,7 @@ float AudioPlayback::GetLaserEffectMix() const
 	return m_laserEffectMix;
 }
 // Independent named filters are chained alongside the ordinary laser DSP.
-// The caller supplies an *explicit* mix. 0 disables and removes that DSP.
+// Explicit mix controls audibility. Triggered retriggers retain their capture at zero mix.
 void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 {
 	// Pre-rendered or external FX tracks must not be modified in this path.
@@ -493,13 +496,15 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 	const uint16 key = (uint16)type;
 	auto &state = m_namedLaserFilters[key];
 	state.mix = mix;
-	if (mix <= 0.0f)
+    const auto inactiveEffect = m_ResolveInactiveEffect(type);
+    const bool retainCapture = inactiveEffect.type == EffectType::Retrigger && m_filterCaptureTimes.count(type);
+	if (mix <= 0.0f && !retainCapture)
 	{
 		m_CleanupDSP(state.dsp);
 		return;
 	}
 	if (state.dsp) { state.dsp->mix = mix; m_UpdateIndependentFXMix(); return; }
-	state.effect = m_ResolveInactiveEffect(type);
+	state.effect = inactiveEffect;
     if (state.effect.type == EffectType::None || state.effect.type == EffectType::SwitchAudio) return;
 	Ref<AudioStream> track = m_GetDSPTrack();
 	state.dsp = state.effect.CreateDSP(m_playback->GetCurrentTimingPoint(),
@@ -530,7 +535,13 @@ void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
             m_buttonDSPs[lane]->startTime=m_filterCaptureTimes[type];
     if (type == m_laserEffectType && m_laserEffect.type == EffectType::Retrigger && m_laserDSP)
         m_laserDSP->startTime = m_filterCaptureTimes[type];
-	const uint16 key = (uint16)type;
+    // A trigger can precede the laser invocation by many measures. Start
+    // recording now even when the named filter is inaudible.
+    const uint16 key = (uint16)type;
+    if (m_ResolveInactiveEffect(type).type == EffectType::Retrigger) {
+        const auto existing = m_namedLaserFilters.find(key);
+        SetNamedLaserFilterMix(type, existing == m_namedLaserFilters.end() ? 0.f : existing->second.mix);
+    }
 	auto it = m_namedLaserFilters.find(key);
 	if (it == m_namedLaserFilters.end() || !it->second.dsp) return;
 	if (it->second.effect.type != EffectType::Retrigger) return;
