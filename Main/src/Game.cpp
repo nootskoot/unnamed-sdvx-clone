@@ -1507,7 +1507,8 @@ public:
 		// Update music filter states
 		// Apply parameter automation before selecting the active laser response.
 		m_audioPlayback.Tick(deltaTime);
-		m_audioPlayback.SetLaserFilterInput(m_scoring.GetLaserOutput(), m_scoring.IsLaserHeld(0, false) || m_scoring.IsLaserHeld(1, false));
+		m_audioPlayback.SetLaserFilterInput(m_scoring.GetLaserOutput(), m_scoring.IsLaserHeld(0, false) || m_scoring.IsLaserHeld(1, false),
+            (m_scoring.IsLaserAudioEligible(0) ? 1u : 0u) | (m_scoring.IsLaserAudioEligible(1) ? 2u : 0u));
 
 		m_audioPlayback.SetFXTrackEnabled(m_scoring.GetLaserActive() || m_scoring.GetFXActive());
 

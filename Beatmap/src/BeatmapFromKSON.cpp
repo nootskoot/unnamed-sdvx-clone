@@ -116,6 +116,11 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         const J& audio = Member(root, "audio");
         const J& bgm = Member(audio, "bgm");
         const J& preview = Member(bgm, "preview");
+        m_settings.peakingFilterDelay = std::max(0, std::min(160,
+            Member(Member(audio,"audio_effect"),"laser").value("peaking_filter_delay",0)));
+        const J& stems = Member(bgm,"legacy");
+        if(stems.contains("fp_filenames") && stems["fp_filenames"].is_array() && stems["fp_filenames"].size()>1)
+            m_settings.peakingFilterDelay=0;
 
         // Metadata is also needed when USC scans song entries.
         m_settings.title = meta.value("title", std::string());
@@ -543,6 +548,16 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             {"release_time","releaseTime"},{"filename","fileName"},
             {"feedback_level","feedbackLevel"},{"chunk_size","chunkSize"},{"overlap","overWrap"}};
         const J& effects = Member(audio,"audio_effect");
+        const J& compat = Member(root,"compat");
+        const J version = compat.value("ksh_version", J());
+        bool legacyCustomDefaults = false;
+        if (version.is_string()) {
+            const std::string v = version.get<std::string>();
+            // Historical suffixes (e.g. 120b) follow a three-digit version.
+            if (v.size() >= 3 && v[0] >= '0' && v[0] <= '9' &&
+                v[1] >= '0' && v[1] <= '9' && v[2] >= '0' && v[2] <= '9')
+                legacyCustomDefaults = std::stoi(v.substr(0,3)) < 200;
+        }
         uint32 nextEffect = uint32(EffectType::UserDefined0);
         auto MakeEffect = [&](const J& category, const std::string& name, const J& overrides, bool off = false) {
             if(name.empty())return AudioEffect::GetDefault(EffectType::None);
@@ -570,7 +585,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             if(!parameters.contains("mix")) parameters["mix"]=base=="gate"?"0%>90%":base=="phaser"?"0%>50%":(base=="flanger"||base=="wobble")?"0%>80%":"0%>100%";
             if(base=="bitcrusher"&&!parameters.contains("reduction"))parameters["reduction"]="0samples-30samples";
             if(base=="tapestop"&&!parameters.contains("speed"))parameters["speed"]="50%";
-            if(base=="sidechain"&&!parameters.contains("release_time"))parameters["release_time"]="1/8";
+            if(base=="sidechain"&&!parameters.contains("release_time"))parameters["release_time"]=(customDefinition && legacyCustomDefaults)?"1/16":"1/8";
             if (overrides.is_object()) for(auto it=overrides.begin();it!=overrides.end();++it) parameters[it.key()]=it.value();
             for(auto it=parameters.begin();it!=parameters.end();++it) {
                 const auto key=paramNames.find(it.key());

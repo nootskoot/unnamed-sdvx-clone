@@ -382,66 +382,65 @@ void TapeStopDSP::Process(float *out, uint32 numSamples)
 
 RetriggerDSP::RetriggerDSP(uint32 sampleRate) : DSP()
 {
-	SetSampleRate(sampleRate);
+    SetSampleRate(sampleRate);
+    // Bounded storage allocated outside the audio callback, matching a ten-second capture window.
+    m_sampleBuffer.resize(size_t(sampleRate) * 10 * 2);
 }
 void RetriggerDSP::SetLength(double length)
 {
-	double flength = length / 1000.0 * m_sampleRate;
-	m_length = (uint32)flength;
-	SetGating(m_gating);
-	if (!m_bufferReserved)
-	{
-		m_sampleBuffer.reserve(2 * m_length + 100);
-		m_bufferReserved = true;
-	}
+    m_length = uint32(Math::Clamp(length * m_sampleRate / 1000.0, 0.0, double(m_sampleBuffer.size()/2)));
+    SetGating(m_gating);
 }
-void RetriggerDSP::SetResetDuration(uint32 resetDuration)
+void RetriggerDSP::SetResetDuration(uint32 duration)
 {
-	float flength = (float)resetDuration / 1000.0f * (float)m_sampleRate;
-	m_resetDuration = (uint32)flength;
+    m_resetDuration = uint32(double(duration) * m_sampleRate / 1000.0);
 }
 void RetriggerDSP::SetGating(float gating)
 {
-	gating = Math::Clamp(gating, 0.f, 1.f);
-	m_gating = gating;
-	m_gateLength = (uint32)((float)m_length * gating);
+    m_gating = Math::Clamp(gating, 0.f, 1.f);
+    m_gateLength = uint32(m_length * m_gating);
 }
-void RetriggerDSP::SetMaxLength(uint32 length)
+void RetriggerDSP::SetMaxLength(uint32) {}
+void RetriggerDSP::Process(float* out, uint32 numSamples)
 {
-	float flength = (float)length / 1000.0f * (float)m_sampleRate;
-	if (!m_bufferReserved)
-	{
-		m_sampleBuffer.reserve(2 * (uint32_t)flength + 100);
-		m_bufferReserved = true;
-	}
-}
-void RetriggerDSP::Process(float *out, uint32 numSamples)
-{
-    if (!m_length || !m_audioBase) return;
-    const float* pcm = m_audioBase->GetPCM();
-    const int64 count = static_cast<int64>(m_audioBase->GetPCMCount());
-    if (!pcm || count < 2) return;
+    if (!m_audioBase || !numSamples) return;
     const double sourceRate = m_audioBase->GetSampleRate();
-    const double step = sourceRate / m_sampleRate * std::max(0.001f, m_audioBase->PlaybackSpeed);
-    const double now = m_audioBase->GetSamplePos();
-    const double start = double(startTime) * sourceRate / 1000.0;
+    const double step = sourceRate / m_sampleRate * std::max(.001f, m_audioBase->PlaybackSpeed);
+    double now = m_audioBase->GetSamplePos();
+    const double trigger = double(startTime) * sourceRate / 1000.0;
     const double origin = double(lastTimingPoint) * sourceRate / 1000.0;
     const double reset = double(m_resetDuration) * step;
-    for (uint32 i = 0; i < numSamples; ++i) {
-        const double position = now + i * step;
-        if (position < start) continue;
-        const double capture = reset > 0 ? origin + std::floor((position-origin)/reset)*reset : start;
-        const double phase = std::fmod(std::max(0.0, (position-capture)/step), double(m_length));
-        const double read = capture + phase * step;
-        const int64 index = static_cast<int64>(std::floor(read));
-        if (index < 0 || index + 1 >= count) continue;
-        const float fraction = float(read-index);
-        const float gate = phase < m_gateLength ? 1.0f : 0.0f;
-        for (int ch=0; ch<2; ++ch) {
-            const float wet = pcm[index*2+ch] + (pcm[(index+1)*2+ch]-pcm[index*2+ch])*fraction;
-            out[i*2+ch] = wet*gate*mix + out[i*2+ch]*(1-mix);
-        }
+    // A discontinuous transport cannot reuse capture from before a seek/restart.
+    if (m_expectedSource < 0 || std::abs(now-m_expectedSource) > std::max(2.0, step*2)) {
+        m_captureFrames=0; m_hasBucket=false;
+    } else {
+        // Source positions are integer frames; preserve fractional resampling phase.
+        now=m_expectedSource;
     }
+    for (uint32 i=0;i<numSamples;++i) {
+        const double position=now+i*step;
+        if(position<trigger) continue;
+        const double bucket=reset>0?std::floor((position-origin)/reset):0;
+        if(m_seenTrigger!=startTime || (reset>0 && m_hasBucket && bucket!=m_resetBucket)) {
+            m_captureFrames=0;
+            m_seenTrigger=startTime;
+        }
+        m_resetBucket=bucket; m_hasBucket=true;
+        // Capture the incoming chain signal even while the effect is mixed out.
+        if(m_captureFrames<m_sampleBuffer.size()/2) {
+            m_sampleBuffer[size_t(m_captureFrames)*2]=out[i*2];
+            m_sampleBuffer[size_t(m_captureFrames)*2+1]=out[i*2+1];
+        }
+        if(m_length) {
+            const size_t phase=size_t(m_captureFrames % m_length);
+            for(int ch=0;ch<2;++ch) {
+                const float wet=phase<m_gateLength?m_sampleBuffer[phase*2+ch]:0.f;
+                out[i*2+ch] += (wet-out[i*2+ch])*mix;
+            }
+        }
+        ++m_captureFrames;
+    }
+    m_expectedSource=now+numSamples*step;
 }
 
 WobbleDSP::WobbleDSP(uint32 sampleRate) : DSP()

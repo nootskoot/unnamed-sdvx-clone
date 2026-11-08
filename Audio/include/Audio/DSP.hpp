@@ -184,6 +184,11 @@ private:
 	Vector<float> m_sampleBuffer;
 	uint32 m_currentSample = 0;
 	bool m_bufferReserved = false;
+    uint64 m_captureFrames = 0;
+    int32 m_seenTrigger = std::numeric_limits<int32>::min();
+    double m_expectedSource = -1.0;
+    double m_resetBucket = 0;
+    bool m_hasBucket = false;
 };
 
 class WobbleDSP : public DSP

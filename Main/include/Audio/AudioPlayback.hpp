@@ -1,4 +1,5 @@
 #pragma once
+#include <Beatmap/LaserAudioSampler.hpp>
 #include <Beatmap/Beatmap.hpp>
 #include <Beatmap/AudioEffects.hpp>
 #include <Audio/AudioStream.hpp>
@@ -67,7 +68,7 @@ public:
 	void SetLaserEffect(EffectType type);
 
 	// The input which controls the laser filter amount
-	void SetLaserFilterInput(float input, bool active = false);
+	void SetLaserFilterInput(float input, bool active = false, unsigned eligibleLanes = 3);
 	float GetLaserFilterInput() const;
 
 	// Set the mix value of the effect on lasers
@@ -135,6 +136,7 @@ private:
 	class DSP *m_laserDSP = nullptr;
 	float m_laserEffectMix = 1.0f;
 	float m_laserInput = 0.0f;
+    LaserAudioSampler m_laserAudioSampler;
 	struct NamedLaserFilterState
 	{
 		GameAudioEffect effect;

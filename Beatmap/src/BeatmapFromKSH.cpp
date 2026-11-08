@@ -555,6 +555,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 	m_settings.previewDuration = 0;
 	m_settings.slamVolume = 0.5f; // KSH default chokkakuvol=50
     m_settings.slamAutoVolume = true; // KSH default chokkakuautovol=1
+    m_settings.peakingFilterDelay = 40;
     m_settings.laserEffectMix = 0.5f; // KSH default pfiltergain=50
 	for (auto &s : kshootMap.settings)
 	{
@@ -600,6 +601,8 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 		{
 			m_settings.laserEffectType = ParseFilterType(s.second);
 		}
+		else if (s.first == "pfilterdelay")
+            m_settings.peakingFilterDelay = Math::Clamp(atoi(*s.second), 0, 160);
 		else if (s.first == "pfiltergain")
 		{
 			m_settings.laserEffectMix = (float)atol(*s.second) / 100.0f;

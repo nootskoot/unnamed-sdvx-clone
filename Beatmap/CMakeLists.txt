@@ -64,3 +64,6 @@ if(NOT WIN32 AND NOT EMSCRIPTEN)
     target_link_libraries(USCKSH2 PRIVATE Iconv::Iconv)
 endif()
 target_link_libraries(Beatmap USCKSH2)
+
+# Private JSON namespace: USC uses a different nlohmann version.
+target_compile_definitions(USCKSH2 PRIVATE nlohmann=usc_kson_nlohmann)

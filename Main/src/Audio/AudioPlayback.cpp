@@ -39,6 +39,7 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 
 	m_playback = &playback;
 	m_beatmap = &playback.GetBeatmap();
+    m_laserAudioSampler.Build(*m_beatmap);
 	m_beatmapRootPath = "";
 	m_chartSource = std::move(chartSource);
 	assert(m_beatmap != nullptr);
@@ -398,8 +399,13 @@ bool AudioPlayback::m_SkipEffectIfInputIsZero()
 		|| m_laserEffect.type == EffectType::LowPassFilter || m_laserEffect.type == EffectType::PitchShift
 		|| m_laserEffect.type == EffectType::Bitcrush;
 }
-void AudioPlayback::SetLaserFilterInput(float input, bool active)
+void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligibleLanes)
 {
+    if(m_laserEffect.type==EffectType::PeakingFilter && m_beatmap && m_playback &&
+       m_beatmap->GetMapSettings().peakingFilterDelay>0 && !m_fxtrack) {
+        active=m_laserAudioSampler.Sample(double(m_playback->GetLastTime())-
+            m_beatmap->GetMapSettings().peakingFilterDelay,eligibleLanes,input);
+    }
     auto independent=m_namedLaserFilters.find(uint16(m_laserEffectType));
     if(independent!=m_namedLaserFilters.end() && independent->second.dsp && independent->second.mix>0) {
         m_CleanupDSP(m_laserDSP);
@@ -528,11 +534,7 @@ void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
 	auto it = m_namedLaserFilters.find(key);
 	if (it == m_namedLaserFilters.end() || !it->second.dsp) return;
 	if (it->second.effect.type != EffectType::Retrigger) return;
-	// Approximate updateTrigger: rebuilding refreshes the repeat source.
-	// This is not an exact KSM resampling implementation.
-	float mix = it->second.mix;
-	m_CleanupDSP(it->second.dsp);
-	SetNamedLaserFilterMix(type, mix);
+	it->second.dsp->startTime = m_filterCaptureTimes[type];
 }
 Ref<AudioStream> AudioPlayback::m_GetDSPTrack()
 {
