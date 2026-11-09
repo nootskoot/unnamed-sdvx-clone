@@ -2,7 +2,7 @@
 A game based on [KShootMania](http://www.kshootmania.com/) and [SDVX](https://remywiki.com/What_is_SOUND_VOLTEX).
 
 ### Project status
-This project is just my attempt at making usc not painfully "almost"
+This project is just "my" attempt at making usc not painfully "almost"
 
 All changes from drewols' original are written using AI, and more so with a free trial of ChatGPT that ran out...someone else, feel free to finish what was started here
 
