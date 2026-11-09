@@ -11,8 +11,6 @@ This fork attempts to get USC in a much better state in terms of KSH compatibili
 
 (done also partially because because it seems very clear kson-rs will be ready to replace usc)
 
-### [**Download latest Windows build**](https://drewol.me/Downloads/Game.zip)
-
 ### [**FAQ**](https://github.com/Drewol/unnamed-sdvx-clone/wiki/F.-A.-Q.)
 
 #### [**Skinning Documentation**](https://unnamed-sdvx-clone.readthedocs.io/en/latest/index.html)
@@ -111,7 +109,7 @@ To run from Visual Studio, go to Properties for Main > Debugging > Working Direc
 	* [Homebrew](https://github.com/Homebrew/brew): `brew install cmake freetype libvorbis sdl2 libpng jpeg-turbo libarchive libiconv`
 2. Run `cmake -DCMAKE_BUILD_TYPE=Release .` and then `make` from the root of the project.
 3. Run the executable made in the 'bin' folder.
-
+~~
 ### Embedded (Raspberry Pi):
 0. Clone the project using `git` and then run `git submodule update --init --recursive` to download the required submodules.
 1. Install the libraries listed in 'build.linux'
@@ -120,3 +118,4 @@ To run from Visual Studio, go to Properties for Main > Debugging > Working Direc
 2. Run `cmake -DEMBEDDED=ON -DCMAKE_BUILD_TYPE=Release .`
 3. If cmake completes succesfully run `make`
 4. Run the executable made in the 'bin' folder
+~~
