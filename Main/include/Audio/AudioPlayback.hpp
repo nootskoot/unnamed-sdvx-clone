@@ -150,6 +150,7 @@ private:
 	HoldObjectState *m_currentHoldEffects[2] = {nullptr};
 	float m_effectMix[2] = {0.0f};
     bool m_effectEnabled[2] = {false,false};
+    uint32 m_lastEnabledFXLane = 0;
 
 	bool m_SkipEffectIfInputIsZero();
 };

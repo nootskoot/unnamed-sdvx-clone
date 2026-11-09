@@ -148,6 +148,7 @@ struct AudioEffect
 
     // KSH granular pitch controls; zero chunk selects the native SoundTouch path.
     uint16 independentFXBus = 0;
+    bool persistentFXCapture = false; // KSH named retrigger: one capture across FX holds
     bool nativeFilter = false;
     bool nativeLegacyGain = false;
     EffectParam<float> filterPosition = EffectParam<float>(0,1);

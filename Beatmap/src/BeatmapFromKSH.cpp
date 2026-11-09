@@ -521,6 +521,37 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 		m_customAudioFilters.Add(type, ParseCustomEffect(it->second, m_switchablePaths));
 	}
 
+
+    auto InactiveFX = [&](KShootEffectDefinition definition) {
+        for (auto& parameter : definition.parameters) {
+            const auto arrow=parameter.second.find('>',1);
+            if (arrow!=String::npos) parameter.second=parameter.second.substr(0,arrow);
+        }
+        return ParseCustomEffect(definition,m_switchablePaths);
+    };
+
+    // Reserve separate filter-namespace buses for FX definitions with explicit
+    // capture triggers. FX and filter IDs otherwise live in separate namespaces.
+    for (const auto& block : kshootMap.blocks) for (const auto& tick : block.ticks)
+        for (const auto& setting : tick.settings) {
+            if (setting.first.find("fx:") != 0) continue;
+            String name, property;
+            const String option = setting.first.substr(3);
+            if (!option.Split(":", &name, &property) || property != "updateTrigger") continue;
+            const auto* id = effectTypeMap.FindEffectType(name);
+            if (!id || !m_customAudioEffects.Contains(*id)) continue;
+            auto& effect = m_customAudioEffects.at(*id);
+            if (effect.type != EffectType::Retrigger || effect.persistentFXCapture) continue;
+            String busName = "__usc_fx_capture_" + name;
+            while (filterTypeMap.FindEffectType(busName)) busName += "_";
+            const auto bus = filterTypeMap.FindOrAddEffectType(busName);
+            m_customAudioFilters[bus] = effect;
+            m_inactiveAudioFilters[bus] = InactiveFX(kshootMap.fxDefines.at(name));
+            m_inactiveAudioFilters[bus].persistentFXCapture = true;
+            effect.independentFXBus = uint16(bus);
+            effect.persistentFXCapture = true;
+        }
+
 	auto ParseFilterType = [&](const String &str) {
 		EffectType type = EffectType::None;
 		if (str == "hpf1")
@@ -982,7 +1013,17 @@ const static int tickResolution = 240;
                         "period", "pitch", "amount", "reduction", "feedbackLevel", "stage", "loFreq", "hiFreq",
                         "chunkSize", "overWrap", "Q", "feedback", "stereoWidth", "hiCutGain", "depth", "delay", "volume", "attackTime",
                         "holdTime", "releaseTime", "ratio", "speed", "freq", "gain", "pan"};
-                    if (id && supported.Contains(property)) {
+                    if (!filter && id && property == "updateTrigger" &&
+                        m_customAudioEffects.Contains(*id) && m_customAudioEffects.at(*id).persistentFXCapture) {
+                        if (p.second == "on") {
+                            auto* event = new EventObjectState();
+                            event->time = mapTime;
+                            event->interTickIndex = tickSettingIndex;
+                            event->key = EventKey::NamedLaserFilterRefresh;
+                            event->data.uintVal = m_customAudioEffects.at(*id).independentFXBus;
+                            m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*event));
+                        }
+                    } else if (id && supported.Contains(property)) {
                         auto& definitions = filter ? automatedFilters : automatedFX;
                         auto& definition = definitions[name];
                         if (definition.parameters.empty()) {
@@ -991,6 +1032,12 @@ const static int tickResolution = 240;
                         }
                         definition.parameters[property] = p.second;
                         auto effect = ParseCustomEffect(definition, m_switchablePaths);
+                        if (!filter && m_customAudioEffects.Contains(*id) && m_customAudioEffects.at(*id).persistentFXCapture) {
+                            effect.independentFXBus = m_customAudioEffects.at(*id).independentFXBus;
+                            effect.persistentFXCapture = true;
+                            m_audioEffectChanges.Add({mapTime, EffectType(effect.independentFXBus), true, effect});
+                            m_audioEffectChanges.Add({mapTime, EffectType(effect.independentFXBus), true, InactiveFX(definition), true});
+                        }
                         if (effect.type != EffectType::None && effect.type != EffectType::SwitchAudio)
                             m_audioEffectChanges.Add({mapTime, *id, filter, effect});
                     } else Logf("[KSH]Unsupported audio automation: %s", Logger::Severity::Warning, p.first);

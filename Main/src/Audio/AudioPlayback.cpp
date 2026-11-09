@@ -29,6 +29,7 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
     m_automationTimingTime = std::numeric_limits<MapTime>::min();
     m_lastCaptureTime = std::numeric_limits<MapTime>::min();
     m_effectEnabled[0] = m_effectEnabled[1] = false;
+    m_lastEnabledFXLane = 0;
     m_effectMix[0] = m_effectMix[1] = 0.0f;
     m_automationTime = std::numeric_limits<MapTime>::min();
 	m_currentHoldEffects[0] = nullptr;
@@ -237,6 +238,37 @@ void AudioPlayback::m_UpdateAutomation(MapTime time)
 void AudioPlayback::m_UpdateIndependentFXMix() {
     for (const auto& entry:m_namedLaserFilters) {
         if(!entry.second.dsp)continue;
+        // Triggered KSH FX holds use the persistent capture DSP itself. Never
+        // replace it with a fresh per-hold DSP that has no pre-hold recording.
+        bool persistent = false;
+        int activeLane = -1;
+        for (int lane=0; lane<2; ++lane)
+            if (m_buttonEffects[lane].persistentFXCapture && m_buttonEffects[lane].independentFXBus==entry.first) {
+                persistent = true;
+                if (m_currentHoldEffects[lane] && m_effectEnabled[lane] && (activeLane < 0 || uint32(lane)==m_lastEnabledFXLane)) activeLane=lane;
+            }
+        if (persistent) {
+            auto* dsp = entry.second.dsp;
+            if (activeLane >= 0) {
+                auto effect=m_buttonEffects[activeLane];
+                effect.UpdateDSP(dsp, m_playback->GetCurrentTimingPoint(), 0.f,
+                    m_GetDSPTrack()->GetAudioSampleRate(), GetPlaybackSpeed());
+                auto params=*m_currentHoldEffects[activeLane];
+                if (m_fxOverrides.count(params.effectType)) {
+                    if (!(params.effectParamMask & 1)) params.effectParams[0]=-1;
+                    if (!(params.effectParamMask & 2)) params.effectParams[1]=-1;
+                    params.effectType=EffectType::UserDefined0;
+                }
+                effect.SetParams(dsp,*this,&params);
+                dsp->mix=m_effectMix[activeLane];
+            } else {
+                GameAudioEffect effect=m_ResolveInactiveEffect(EffectType(entry.first));
+                effect.UpdateDSP(dsp,m_playback->GetCurrentTimingPoint(),0.f,
+                    m_GetDSPTrack()->GetAudioSampleRate(),GetPlaybackSpeed());
+                dsp->mix=entry.second.mix;
+            }
+            continue;
+        }
         bool used=false, held=false;
         for(int lane=0;lane<2;++lane)if(m_buttonEffects[lane].independentFXBus==entry.first) {
             used=true;
@@ -317,6 +349,14 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 
 	m_buttonEffects[index] = m_ResolveEffect(object->effectType, false);
 
+    if (m_buttonEffects[index].persistentFXCapture) {
+        const auto bus=EffectType(m_buttonEffects[index].independentFXBus);
+        if (!m_filterCaptureTimes.count(bus)) m_filterCaptureTimes[bus]=object->time;
+        SetNamedLaserFilterMix(bus,0.f);
+        m_UpdateIndependentFXMix();
+        return;
+    }
+
 	// Do not create DSP for SwitchAudio effect
 	if (m_buttonEffects[index].type == EffectType::SwitchAudio)
 		return;
@@ -342,7 +382,10 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 
 	// Initialize mix value to previous value
 	dsp->mix = m_effectMix[index];
-	dsp->startTime = m_filterCaptureTimes.count(object->effectType) ? m_filterCaptureTimes.at(object->effectType) : object->time;
+    const auto* captureDefinition=m_beatmap->GetInactiveFilter(object->effectType);
+    const bool reservedFXBus=captureDefinition && captureDefinition->persistentFXCapture;
+    dsp->startTime = !reservedFXBus && m_filterCaptureTimes.count(object->effectType)
+        ? m_filterCaptureTimes.at(object->effectType) : object->time;
 	dsp->chartOffset = playback.GetBeatmap().GetMapSettings().offset;
 	dsp->lastTimingPoint = playback.GetCurrentTimingPoint().time;
 
@@ -353,6 +396,7 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 void AudioPlayback::SetEffectEnabled(uint32 index, bool enabled)
 {
 	assert(index <= 1);
+    if (enabled && !m_effectEnabled[index]) m_lastEnabledFXLane=index;
 	m_effectEnabled[index] = enabled;
 	m_effectMix[index] = enabled ? m_buttonEffects[index].mix.Sample() : 0.0f;
 
@@ -530,8 +574,12 @@ void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
         if (e->key == EventKey::NamedLaserFilterRefresh && e->data.uintVal == uint32(uint16(type)))
             m_filterCaptureTimes[type] = e->time;
     }
+    // KSH FX/filter IDs are separate namespaces. A reserved capture bus can
+    // numerically equal an unrelated ordinary FX ID; do not refresh that DSP.
+    const auto* captureDefinition=m_beatmap->GetInactiveFilter(type);
+    const bool persistentFXBus=captureDefinition && captureDefinition->persistentFXCapture;
     for (int lane=0;lane<2;++lane)
-        if(m_currentHoldEffects[lane] && m_currentHoldEffects[lane]->effectType==type && m_buttonDSPs[lane] && m_buttonEffects[lane].type==EffectType::Retrigger)
+        if(!persistentFXBus && m_currentHoldEffects[lane] && m_currentHoldEffects[lane]->effectType==type && m_buttonDSPs[lane] && m_buttonEffects[lane].type==EffectType::Retrigger)
             m_buttonDSPs[lane]->startTime=m_filterCaptureTimes[type];
     if (type == m_laserEffectType && m_laserEffect.type == EffectType::Retrigger && m_laserDSP)
         m_laserDSP->startTime = m_filterCaptureTimes[type];
