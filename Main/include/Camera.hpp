@@ -1,4 +1,5 @@
 #pragma once
+#include <Beatmap/KSONSwing.hpp>
 
 /*
 	Camera shake effect.
@@ -65,6 +66,7 @@ public:
 	void SetLasersActive(bool lasersActive);
 	void SetTargetRoll(float target);
 	void SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback);
+	void SetNativeSwing(const KSONSwing& swing, class BeatmapPlayback& playback);
 	void SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude, uint32 frequency, float decay, class BeatmapPlayback &playback);
 	[[nodiscard]]
 	float GetRoll() const;
@@ -147,6 +149,9 @@ private:
 	// x offset
 	float m_totalOffset = 0.0f;
 	float m_spinBounceOffset = 0.0f;
+    KSONSwing m_nativeSwing;
+    double m_nativeSwingStart = 0;
+    double m_nativeSwingLastTime = -1;
 	// roll value
 	float m_totalRoll = 0.0f;
 	// Used for crit line position

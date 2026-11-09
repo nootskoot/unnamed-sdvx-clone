@@ -410,6 +410,24 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         ReadSpinPattern("spin", SpinStruct::SpinType::Full);
         ReadSpinPattern("half_spin", SpinStruct::SpinType::Quarter);
 
+        std::map<std::pair<uint32,int>, KSONSwing> swingAtPulse;
+        for(const auto& entry : Items(patterns,"swing")) {
+            if(!entry.is_array() || (entry.size()!=3 && entry.size()!=4)) continue;
+            try {
+                const uint32 pulse=GetPulse(entry[0]);
+                KSONSwing swing; swing.direction=entry[1].get<int>(); swing.length=GetPulse(entry[2]);
+                if(!swing.length || (swing.direction!=-1 && swing.direction!=1)) continue;
+                if(entry.size()==4) {
+                    if(!entry[3].is_object()) continue;
+                    swing.scale=entry[3].value("scale",250.0);
+                    if(entry[3].contains("repeat")) swing.repeat=GetPulse(entry[3]["repeat"]);
+                    if(entry[3].contains("decay_order")) swing.decay=GetPulse(entry[3]["decay_order"]);
+                }
+                if(!std::isfinite(swing.scale) || swing.decay>2) continue;
+                swingAtPulse[{pulse,swing.direction}]=swing;
+            } catch(const std::exception&) { /* Ignore invalid optional camera data. */ }
+        }
+
         const J& laserLanes = Items(note, "laser");
         for (size_t lane = 0; lane < laserLanes.size() && lane < 2; ++lane) {
             if (!laserLanes[lane].is_array()) continue;
@@ -435,6 +453,8 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     // same-direction laser slam; other laser events are unaffected.
                     if (instantaneous) {
                         const int direction = p1 > p0 ? 1 : (p1 < p0 ? -1 : 0);
+                        const auto swing = swingAtPulse.find({y0,direction});
+                        if(swing!=swingAtPulse.end()) obj->nativeSwing=swing->second;
                         const auto spin = spinAtPulse.find({y0, direction});
                         if (spin != spinAtPulse.end()) {
                             obj->spin.type = spin->second.first;
@@ -463,30 +483,67 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         throw std::runtime_error("Invalid KSON laser point ordering or position");
                     lastPulse = std::max(lastPulse, y);
                     if (!first && y > prevY) {
-                        const MapTime elapsed = TimeAt(y) - TimeAt(prevY);
-                        const bool curved = prevCurve.first != 0.0 || prevCurve.second != 0.0;
-                        if (!curved || values.first == prevAfter || elapsed <= 16) {
-                            addSegment(prevY, y, prevAfter, values.first, false);
-                        } else {
-                            // Approximate a KSON quadratic curve with USC's existing
-                            // straight laser meshes, while preserving the exact end ticks.
-                            // Avoid sub-millisecond segments at high chart BPM.
-                            const uint32 count = std::min<uint32>(
-                                12, std::min<uint32>(y - prevY, uint32(elapsed / 8)));
-                            uint32 subStart = prevY;
-                            double subValue = prevAfter;
-                            for (uint32 i = 1; i <= count; ++i) {
-                                const uint32 subEnd = prevY + uint32(
-                                    (uint64_t(y - prevY) * i) / count);
-                                const double fraction = double(subEnd - prevY) / double(y - prevY);
-                                const double eased = KsonCurveAt(prevCurve.first, prevCurve.second, fraction);
-                                const double nextValue = prevAfter + (values.first - prevAfter) * eased;
-                                if (subEnd > subStart)
-                                    addSegment(subStart, subEnd, subValue, nextValue, false);
-                                subStart = subEnd;
-                                subValue = nextValue;
+                        // USC interpolates each object in milliseconds, whereas KSON
+                        // defines its graph in pulses. Always split at tempo changes,
+                        // including straight graphs, before approximating the curve.
+                        auto valueAt = [&](uint32 pulse) {
+                            const double x = double(pulse - prevY) / double(y - prevY);
+                            return prevAfter + (values.first - prevAfter) *
+                                KsonCurveAt(prevCurve.first, prevCurve.second, x);
+                        };
+                        unsigned splitsLeft = 255;
+                        auto subdivide = [&](auto&& self, uint32 lo, uint32 hi,
+                                             double vlo, double vhi, unsigned depth) -> void {
+                            const double x0 = double(lo - prevY) / double(y - prevY);
+                            const double x1 = double(hi - prevY) / double(y - prevY);
+                            const double a = prevCurve.first, b = prevCurve.second;
+                            double error = 0.0;
+                            if (values.first != prevAfter && a != b) {
+                                // A quadratic graph has curvature of constant sign.
+                                // Its greatest chord error is where dy/dx equals the
+                                // chord slope; check that extremum, not just midpoint.
+                                const double f0 = KsonCurveAt(a, b, x0);
+                                const double f1 = KsonCurveAt(a, b, x1);
+                                const double slope = (f1 - f0) / (x1 - x0);
+                                const double denom = (1.0 - 2.0*b) - slope*(1.0 - 2.0*a);
+                                if (std::abs(denom) > 1e-14) {
+                                    const double t = (slope*a - b) / denom;
+                                    const double x = 2.0*a*t*(1.0-t) + t*t;
+                                    if (t > 0.0 && t < 1.0 && x > x0 && x < x1) {
+                                        const double v = 2.0*b*t*(1.0-t) + t*t;
+                                        error = std::abs((v - (f0 + slope*(x-x0))) *
+                                            (values.first - prevAfter));
+                                    }
+                                }
                             }
+                            const uint32 mid = lo + (hi - lo)/2;
+                            // Bound mesh growth and respect USC's millisecond clock.
+                            // Extended lasers span twice the width, so halve tolerance.
+                            const double tolerance = extended ? 0.0005 : 0.001;
+                            if (error > tolerance && depth < 24 && splitsLeft > 0 && mid > lo && mid < hi &&
+                                TimeAt(mid) > TimeAt(lo) && TimeAt(mid) < TimeAt(hi)) {
+                                --splitsLeft;
+                                const double vmid = valueAt(mid);
+                                self(self, lo, mid, vlo, vmid, depth+1);
+                                self(self, mid, hi, vmid, vhi, depth+1);
+                            } else {
+                                addSegment(lo, hi, vlo, vhi, false);
+                            }
+                        };
+                        uint32 start = prevY;
+                        double startValue = prevAfter;
+                        auto tempo = bpmAtPulse.upper_bound(prevY);
+                        while (tempo != bpmAtPulse.end() && tempo->first < y) {
+                            const uint32 end = tempo->first;
+                            const double endValue = valueAt(end);
+                            splitsLeft = 255;
+                            subdivide(subdivide, start, end, startValue, endValue, 0);
+                            start = end;
+                            startValue = endValue;
+                            ++tempo;
                         }
+                        splitsLeft = 255;
+                        subdivide(subdivide, start, y, startValue, values.first, 0);
                     }
                     if (values.first != values.second) addSegment(y, y, values.first, values.second, true);
                     prevCurve = {0.0, 0.0};

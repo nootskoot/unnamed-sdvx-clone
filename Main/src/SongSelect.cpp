@@ -220,8 +220,13 @@ public:
 
 		if (res == -1)
 		{
-			Logf("Couldn't find original map %u after map set change", Logger::Severity::Info, lastMapIndex);
-			SelectItemBySortIndex(0);
+			// The old map may not belong to the newly selected table.
+			// Selecting the first entry is a successful fallback, not a failure.
+			if (!m_sortVec.empty())
+			{
+				SelectItemBySortIndex(0);
+				res = 0;
+			}
 		}
 
 		return res;
@@ -289,6 +294,101 @@ public:
 	int GetSelectedDifficultyIndex() const
 	{
 		return m_currentlySelectedDiff;
+	}
+
+	// Diagnostic: a catalog match is not necessarily a visible song-wheel
+	// match. The latter is what ChartSetFilter actually filters.
+	size_t CountChartIdsInWheel(const Vector<int32>& chartIds) const
+	{
+		std::unordered_set<int32> needed;
+		for (int32 id : chartIds)
+			needed.insert(id);
+		size_t found = 0;
+		for (const auto& item : m_items)
+			for (const ChartIndex* chart : item.second.GetCharts())
+				if (needed.erase(chart->id))
+					++found;
+		return found;
+	}
+
+	// Diagnostic: compare the table-only subset with the final combined
+	// Level+Folder-filtered song wheel and its sorted view.
+	size_t CountTableOnlyCharts(SongFilter* filter) const
+	{
+		if (!filter) return 0;
+		size_t count = 0;
+		for (const auto& entry : filter->GetFiltered(m_items))
+			count += entry.second.GetCharts().size();
+		return count;
+	}
+
+	size_t CountVisibleCharts() const
+	{
+		size_t count = 0;
+		for (const auto& entry : m_SourceCollection())
+			count += entry.second.GetCharts().size();
+		return count;
+	}
+
+	size_t CountSortedSongs() const { return m_sortVec.size(); }
+
+	// A table is a view over existing charts. Rebind the Lua song array AND
+	// the active song/difficulty index when switching to that view. Otherwise
+	// a skin can retain an index from the much larger unfiltered library.
+	void SyncFavLuaState()
+	{
+		if (!m_lua)
+			return;
+
+		if (!m_sortVec.empty())
+		{
+			const SongSelectIndex* current =
+				m_SourceCollection().Find(m_getCurrentlySelectedItemIndex());
+			if (!current)
+			{
+				SelectItemBySortIndex(0);
+				current = m_SourceCollection().Find(m_getCurrentlySelectedItemIndex());
+			}
+			if (current && !current->GetCharts().empty() &&
+				(m_currentlySelectedDiff < 0 ||
+				 m_currentlySelectedDiff >= static_cast<int32>(current->GetCharts().size())))
+			{
+				SelectDifficulty(0);
+			}
+		}
+
+		// Re-export the actual filtered/sorted set, not only the C++ vector.
+		m_SetCurrentItems();
+		if (!m_sortVec.empty())
+		{
+			m_SetLuaItemIndex();
+			m_SetLuaDiffIndex();
+		}
+
+		lua_getglobal(m_lua, "songwheel");
+		size_t exported = 0;
+		if (lua_istable(m_lua, -1))
+		{
+			lua_getfield(m_lua, -1, "songs");
+			if (lua_istable(m_lua, -1))
+			{
+				lua_pushnil(m_lua);
+				while (lua_next(m_lua, -2) != 0)
+				{
+					++exported;
+					lua_pop(m_lua, 1);
+				}
+			}
+			lua_pop(m_lua, 1);
+		}
+		lua_pop(m_lua, 1);
+		Logf("[FAV/LUA] filtered=%d sorted=%d exported=%d selection=%d diff=%d",
+			Logger::Severity::Info,
+			static_cast<int>(m_SourceCollection().size()),
+			static_cast<int>(m_sortVec.size()),
+			static_cast<int>(exported),
+			static_cast<int>(m_getCurrentlySelectedItemIndex()),
+			static_cast<int>(m_currentlySelectedDiff));
 	}
 
 	void SelectMapByMapId(uint32 id)
@@ -596,6 +696,27 @@ public:
 		}
 		m_currentFilters[t] = filter;
 		m_selectionWheel->SetFilter(m_currentFilters);
+
+		// KSM .fav tables use existing folder/chart IDs. Keep the Lua view
+		// synchronized when their sparse chart subset replaces a larger list.
+		if (m_currentFilters[0] &&
+			m_currentFilters[0]->GetName().find("KSM FAV: ") == 0)
+			m_selectionWheel->SyncFavLuaState();
+
+		// Only log KSM .fav selections. There are three distinct failures
+		// worth distinguishing: no chart IDs in table-only output, a second
+		// filter eliminating them, or the Lua/sorted song view going stale.
+		if (m_currentFilters[0] &&
+			m_currentFilters[0]->GetName().find("KSM FAV: ") == 0)
+		{
+			Logf("[FAV/FILTER] %s | level=%s | table-only charts=%d | combined charts=%d | sorted songs=%d",
+				Logger::Severity::Info,
+				m_currentFilters[0]->GetName().c_str(),
+				m_currentFilters[1] ? m_currentFilters[1]->GetName().c_str() : "<none>",
+				static_cast<int>(m_selectionWheel->CountTableOnlyCharts(m_currentFilters[0])),
+				static_cast<int>(m_selectionWheel->CountVisibleCharts()),
+				static_cast<int>(m_selectionWheel->CountSortedSongs()));
+		}
 	}
 
 	void SetFiltersByIndex(uint32 level, uint32 folder)
@@ -999,6 +1120,9 @@ private:
 
 	Timer m_dbUpdateTimer;
 	MapDatabase* m_mapDatabase;
+	// A chart search can update local .fav table IDs without producing a
+	// folder change event; always rebind the filter wheel after it finishes.
+	bool m_favPostScanRefreshPending = false;
 
 	// Map selection wheel
 	Ref<SelectionWheel> m_selectionWheel;
@@ -1094,6 +1218,7 @@ public:
 		if (reloadsDatabase && m_backbeatCatalog && m_backbeatCatalog->IsOpen())
 			(void)m_backbeatCatalog->PullCatalog();
 		m_mapDatabase->StartSearching();
+		m_favPostScanRefreshPending = true;
 	}
 
 	String m_getCurrentChartName()
@@ -1132,6 +1257,7 @@ public:
 		m_mapDatabase->OnSearchStatusUpdated.Add(m_selectionWheel.get(), &SelectionWheel::OnSearchStatusUpdated);
 		m_selectionWheel->OnItemsChanged.Add(m_filterSelection.get(), &FilterSelection::OnSongsChanged);
 		m_mapDatabase->StartSearching();
+		m_favPostScanRefreshPending = true;
 
 		m_filterSelection->SetFiltersByIndex(g_gameConfig.GetInt(GameConfigKeys::LevelFilter), g_gameConfig.GetInt(GameConfigKeys::FolderFilter));
 
@@ -1748,6 +1874,28 @@ public:
 			m_dbUpdateTimer.Restart();
 		}
 
+		// The scan thread can finish without adding/updating any folder, so
+		// OnItemsChanged alone is not sufficient to refresh local .fav filters.
+		// Execute this once on the UI thread, after flushing pending chart changes.
+		if (m_favPostScanRefreshPending && !m_mapDatabase->IsSearching())
+		{
+			m_mapDatabase->Update();
+			m_filterSelection->UpdateFilters();
+			for (const TableIndex& table : m_mapDatabase->GetTables())
+			{
+				if (table.url.find("fav://local/") != 0)
+					continue;
+				for (const TableSectionIndex& section : table.levels)
+				{
+					const size_t found = m_selectionWheel->CountChartIdsInWheel(section.chartIds);
+					Logf("[FAV/UI] %s: %d/%d chart IDs present in song wheel",
+						Logger::Severity::Info, table.url.c_str(),
+						static_cast<int>(found), static_cast<int>(section.chartIds.size()));
+				}
+			}
+			m_favPostScanRefreshPending = false;
+		}
+
 		// Tick navigation
 		if (!IsSuspended())
 		{
@@ -1903,6 +2051,8 @@ public:
 		m_transitionedToGame = false;
 		m_previewPlayer.Restore();
 		m_mapDatabase->Update(); //flush pending db changes before setting lua tables
+		// Rebind any local tables changed while gameplay was active.
+		m_filterSelection->UpdateFilters();
 		m_selectionWheel->ResetLuaTables();
 		m_mapDatabase->ResumeSearching();
 		if (g_gameConfig.GetBool(GameConfigKeys::EventMode))

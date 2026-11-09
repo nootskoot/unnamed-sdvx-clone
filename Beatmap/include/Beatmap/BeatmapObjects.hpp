@@ -6,6 +6,7 @@
 	No vtable for smaller memory footprint
 */
 #pragma once
+#include "KSONSwing.hpp"
 // For effect type enum
 #include "AudioEffects.hpp"
 
@@ -230,6 +231,7 @@ struct ObjectTypeData_Laser
 	TObjectState<ObjectTypeData_Laser> *prev = nullptr;
 
 	SpinStruct spin;
+    KSONSwing nativeSwing;
 
 	static const ObjectType staticType = ObjectType::Laser;
 

@@ -835,7 +835,11 @@ public:
 
 	const Vector<TableIndex>& GetTables() const
 	{
-		const_cast<MapDatabase_Impl*>(this)->m_RefreshLocalFavTables();
+		// Do not resolve .fav entries against the empty chart index before
+		// StartSearching()/m_LoadInitialData() has loaded the database.
+		// The full refresh still runs after database initialization and updates.
+		if (!m_charts.empty())
+			const_cast<MapDatabase_Impl*>(this)->m_RefreshLocalFavTables();
 		return m_tables;
 	}
 	const Vector<PackIndex>& GetPacks() const

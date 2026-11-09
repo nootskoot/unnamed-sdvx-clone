@@ -2196,6 +2196,8 @@ public:
         }
         m_nextSlamSound = 0;
 
+		if (object->nativeSwing.length) m_camera.SetNativeSwing(object->nativeSwing, m_playback);
+
 		if (object->spin.type != 0)
 		{
 			if (object->spin.type == SpinStruct::SpinType::Bounce)

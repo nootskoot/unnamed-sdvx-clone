@@ -2,6 +2,7 @@
 #include "Camera.hpp"
 #include "Application.hpp"
 #include "Track.hpp"
+#include <Beatmap/KSONScroll.hpp>
 
 const float ZOOM_POW = 1.65f;
 
@@ -229,7 +230,14 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
         m_legacyOffset += (pLaneOffset - m_legacyOffset) * rate;
         renderPitch = m_legacyPitch; renderZoom = m_legacyZoom; renderOffset = m_legacyOffset;
     }
-    m_totalOffset = (renderOffset * (5 * 100) / (6 * 116)) / 2.0f + m_spinBounceOffset;
+    double nativeOffset=0;
+    if(const auto* scroll=playback.GetBeatmap().GetKSONScroll()) {
+        const double now=playback.GetLastTime();
+        if(now<m_nativeSwingLastTime) m_nativeSwing.length=0;
+        m_nativeSwingLastTime=now;
+        nativeOffset=m_nativeSwing.Offset(scroll->Pulse(now)-m_nativeSwingStart);
+    }
+    m_totalOffset = ((renderOffset + nativeOffset) * (5 * 100) / (6 * 116)) / 2.0f + m_spinBounceOffset;
 
 	// Update camera shake effects
 	if (m_shakeEffect.amplitudeToBeAdded != 0)
@@ -520,4 +528,13 @@ float Camera::m_ClampRoll(float in) const
 		// Keep sign and modulo
 		return sign * fmodf(ain, 1.0f);
 	}
+}
+
+void Camera::SetNativeSwing(const KSONSwing& swing, BeatmapPlayback& playback)
+{
+    if(const auto* scroll=playback.GetBeatmap().GetKSONScroll()) {
+        m_nativeSwing=swing;
+        m_nativeSwingLastTime=playback.GetLastTime();
+        m_nativeSwingStart=scroll->Pulse(m_nativeSwingLastTime);
+    }
 }
