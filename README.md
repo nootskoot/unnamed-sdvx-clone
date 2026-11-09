@@ -2,7 +2,14 @@
 A game based on [KShootMania](http://www.kshootmania.com/) and [SDVX](https://remywiki.com/What_is_SOUND_VOLTEX).
 
 ### Project status
-This repository is practically in maintenance mode as I would much rather spend my time on the rewrite to Rust that can be found [here](https://github.com/Drewol/kson-rs).
+This project is just my attempt at making usc not painfully "almost"
+
+All changes from drewols' original are written using AI, and more so with a free trial of ChatGPT that ran out...someone else, feel free to finish what was started here
+
+This fork attempts to get USC in a much better state in terms of KSH compatibility. Adding KSH v2 as well as kson support works "well"
+
+
+(done also partially because because it seems very clear kson-rs will be ready to replace usc)
 
 ### [**Download latest Windows build**](https://drewol.me/Downloads/Game.zip)
 
