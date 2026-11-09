@@ -224,6 +224,7 @@ struct ObjectTypeData_Laser
     // Runtime KSH preset: 0=skin default, 1=down, 2=swing, 3=mute, 4=up.
     uint8 slamSound = 0;
     uint16 slamSample = 65535;
+    uint32 nativeSpinLength = 0; // KSON pulses; zero selects legacy timing.
 	// Position of the laser on the track
 	float points[2];
 	// Set the to the object state that connects to this laser, if any, otherwise null

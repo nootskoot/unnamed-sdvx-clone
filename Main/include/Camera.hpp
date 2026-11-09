@@ -65,7 +65,7 @@ public:
 	void SetSlowTilt(bool tilt);
 	void SetLasersActive(bool lasersActive);
 	void SetTargetRoll(float target);
-	void SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback);
+	void SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback, uint32 nativeLength = 0);
 	void SetNativeSwing(const KSONSwing& swing, class BeatmapPlayback& playback);
 	void SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude, uint32 frequency, float decay, class BeatmapPlayback &playback);
 	[[nodiscard]]
@@ -149,6 +149,9 @@ private:
 	// x offset
 	float m_totalOffset = 0.0f;
 	float m_spinBounceOffset = 0.0f;
+    uint32 m_nativeSpinLength = 0;
+    double m_nativeSpinStart = 0;
+    double m_nativeSpinLastTime = 0;
     KSONSwing m_nativeSwing;
     double m_nativeSwingStart = 0;
     double m_nativeSwingLastTime = -1;

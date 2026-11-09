@@ -1674,6 +1674,23 @@ const static int tickResolution = 240;
 		}
 	}
 
+    // Match libkson's pre-170 manual-tilt convention across the whole graph.
+    if(m_settings.kshBehaviorVersion>=0 && m_settings.kshBehaviorVersion<170) {
+        auto& graph=m_effects.GetGraph(EffectTimeline::GraphType::ROTATION_Z);
+        bool legacy=false;
+        for(const auto& p:graph)
+            legacy |= std::abs(p.second.value.first)>=10.0/36.0 || std::abs(p.second.value.second)>=10.0/36.0;
+        if(legacy) {
+            // Transform both sides in place. Insert preserves the existing
+            // incoming value at a timestamp and only updates its outgoing
+            // value, which would distort ramps and introduce false jumps.
+            for(auto& p:graph) {
+                p.second.value.first *= 1.4;
+                p.second.value.second *= 1.4;
+            }
+        }
+    }
+
 	// Add chart end event
 	EventObjectState *evt = new EventObjectState();
 	evt->time = lastMapTime + 2000;

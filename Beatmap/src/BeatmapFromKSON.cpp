@@ -237,6 +237,10 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         // the same /100 scaling as the KSH zoom and center_split settings.
         // Camera graph control points are evaluated by LineGraph.
         const J& camera = Member(root, "camera");
+        auto ValidCurve = [](const std::pair<double,double>& c) {
+            return std::isfinite(c.first) && std::isfinite(c.second) &&
+                c.first>=0 && c.first<=1 && c.second>=0 && c.second<=1;
+        };
         const J& cameraBody = Member(Member(camera, "cam"), "body");
         auto ReadCameraGraph = [&](const char* key, LineGraph& graph, double scale) {
             for (const J& event : Items(cameraBody, key)) {
@@ -248,6 +252,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     LineGraph::Point point(values.first * scale, values.second * scale);
                     if (event.size() >= 3 && event[2].is_array() && event[2].size() == 2)
                         point.curve = {event[2][0].get<double>(), event[2][1].get<double>()};
+                    if(!ValidCurve(point.curve)) continue;
                     graph.Insert(TimeAt(y), point);
                 } catch (const std::exception&) {
                     // Camera is nonessential to chart loading: ignore malformed points.
@@ -277,6 +282,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                 bool curved = false;
                 J curve;
                 std::string autoMode;
+                bool manualEndpoint=false;
                 if (value.is_number()) {
                     const double v = value.get<double>();
                     rotation = LineGraph::Point(v * (-10.0 / 360.0));
@@ -297,8 +303,9 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                                                     value[0][1].get<double>() * (-10.0 / 360.0));
                         curve = value[1]; curved = true; manual = true;
                     } else if (value[0].is_number() && value[1].is_string()) {
-                        // The instantaneous manual->auto transition can't be
-                        // accurately represented as one USC event: use its final auto state.
+                        rotation=LineGraph::Point(value[0].get<double>()*(-10.0/360.0));
+                        if(!std::isfinite(rotation.value.first)) continue;
+                        manualEndpoint=true;
                         autoMode = value[1].get<std::string>();
                     } else continue;
                 } else continue;
@@ -308,13 +315,12 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     if (!std::isfinite(rotation.value.first) || !std::isfinite(rotation.value.second)) continue;
                     if (curved)
                         rotation.curve = {curve[0].get<double>(), curve[1].get<double>()};
+                    if(!ValidCurve(rotation.curve)) continue;
                     m_effects.GetGraph(EffectTimeline::GraphType::ROTATION_Z).Insert(when, rotation);
                     behaviour = TrackRollBehaviour::Manual;
                     manualTiltActive = true;
                 } else {
-                    if (manualTiltActive)
-                        m_effects.GetGraph(EffectTimeline::GraphType::ROTATION_Z).Extend(when);
-                    manualTiltActive = false;
+
                     bool keep = false;
                     if (autoMode.compare(0, 5, "keep_") == 0) {
                         keep = true; autoMode = autoMode.substr(5);
@@ -325,6 +331,11 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     else if (autoMode == "zero") behaviour = TrackRollBehaviour::Zero;
                     else continue;
                     if (keep) behaviour = behaviour | TrackRollBehaviour::Keep;
+                    if(manualEndpoint)
+                        m_effects.GetGraph(EffectTimeline::GraphType::ROTATION_Z).Insert(when,rotation);
+                    else if(manualTiltActive)
+                        m_effects.GetGraph(EffectTimeline::GraphType::ROTATION_Z).Extend(when);
+                    manualTiltActive=false;
                 }
                 auto* evt = new EventObjectState();
                 evt->time = when;
@@ -391,9 +402,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         // A KSON graph value may be [v,vf]: this denotes an INSTANT change,
         // not a position range. Curved interpolation is deferred to stage 2.
         // KSON camera slam patterns: attach native spin metadata to laser slams.
-        // KSON durations are 240 pulses/beat; USC SpinStruct uses 192/whole note.
-        // Camera::Tick completes Full/Quarter spins at progress 2, so SetSpin needs half of the requested KSON duration.
-        // KSON pulse-to-legacy unit ratio is 5:1; divide by 10 overall.
+        // Native spin lengths remain in pulses, including across BPM changes.
         using SpinSpec = std::pair<SpinStruct::SpinType, uint32>;
         std::map<std::pair<uint32, int>, SpinSpec> spinAtPulse;
         const J& cameraSlamEvents = Member(
@@ -408,9 +417,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     const uint32 length = GetPulse(entry[2]);
                     if ((direction != -1 && direction != 1) || length == 0)
                         continue;
-                    const uint32 uscDuration = static_cast<uint32>(
-                        std::max(1.0, std::round(static_cast<double>(length) / 10.0)));
-                    spinAtPulse[{pulse, direction}] = {type, uscDuration};
+                    spinAtPulse[{pulse, direction}] = {type, length};
                 } catch (const std::exception&) {
                     // Bad optional camera data must not reject a playable chart.
                 }
@@ -468,7 +475,8 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         const auto spin = spinAtPulse.find({y0, direction});
                         if (spin != spinAtPulse.end()) {
                             obj->spin.type = spin->second.first;
-                            obj->spin.duration = spin->second.second;
+                            obj->nativeSpinLength = spin->second.second;
+                            obj->spin.duration = 1; // Native camera path uses exact pulses.
                             obj->spin.direction = static_cast<float>(direction);
                         }
                     }

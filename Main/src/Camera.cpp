@@ -185,6 +185,13 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	}
 
 	m_spinProgress = m_spinDuration > 0 ? (float)(playback.GetLastTime() - m_spinStart) / m_spinDuration : 2.0f;
+    if(m_nativeSpinLength) {
+        const auto now=playback.GetLastTime();
+        if(now<m_nativeSpinLastTime) { m_nativeSpinLength=0; m_spinDuration=0; m_spinProgress=2; }
+        else if(const auto* scroll=playback.GetBeatmap().GetKSONScroll())
+            m_spinProgress=float(2*(scroll->Pulse(now)-m_nativeSpinStart)/m_nativeSpinLength);
+        m_nativeSpinLastTime=now;
+    }
 	// Calculate camera spin
 	// TODO(local): spins need a progress of 1
 	if (m_spinProgress < 2.0f)
@@ -442,7 +449,7 @@ void Camera::SetTargetRoll(float target)
 		m_rollKeepTargetRoll = actualTarget;
 }
 
-void Camera::SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback)
+void Camera::SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback, uint32 nativeLength)
 {
 	const TimingPoint& currentTimingPoint = playback.GetCurrentTimingPoint();
 
@@ -450,6 +457,10 @@ void Camera::SetSpin(float direction, uint32 duration, uint8 type, class Beatmap
 	m_spinDuration = (duration / 192.0f) * (currentTimingPoint.beatDuration) * 4;
 	m_spinStart = playback.GetLastTime();
 	m_spinType = type;
+    m_nativeSpinLength = nativeLength;
+    m_nativeSpinLastTime = playback.GetLastTime();
+    if(const auto* scroll=playback.GetBeatmap().GetKSONScroll())
+        m_nativeSpinStart=scroll->Pulse(m_nativeSpinLastTime);
 }
 
 void Camera::SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude, uint32 frequency, float decay, class BeatmapPlayback &playback)
@@ -461,6 +472,7 @@ void Camera::SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude
 	m_spinDuration = 0.5f * (duration / 192.0f) * (currentTimingPoint.beatDuration) * 4;
 	m_spinStart = playback.GetLastTime();
 	m_spinType = SpinStruct::SpinType::Bounce;
+    m_nativeSpinLength = 0;
 
 	m_spinBounceAmplitude = amplitude / 250.0f;
 	m_spinBounceFrequency = frequency;
