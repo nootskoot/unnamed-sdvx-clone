@@ -109,13 +109,15 @@ To run from Visual Studio, go to Properties for Main > Debugging > Working Direc
 	* [Homebrew](https://github.com/Homebrew/brew): `brew install cmake freetype libvorbis sdl2 libpng jpeg-turbo libarchive libiconv`
 2. Run `cmake -DCMAKE_BUILD_TYPE=Release .` and then `make` from the root of the project.
 3. Run the executable made in the 'bin' folder.
+
+~~### Embedded (Raspberry Pi):~~
+~~0. Clone the project using `git` and then run `git submodule update --init --recursive` to download the required submodules.
+~~1. Install the libraries listed in 'build.linux'~~
+~~	* For things that are not in the package manager repository or too low of a version you have to download and build yourself
+~~	* SDL2 Can be installed using the instructions found [here](https://wiki.libsdl.org/Installation#Raspberry_Pi)~~
+~~2. Run `cmake -DEMBEDDED=ON -DCMAKE_BUILD_TYPE=Release .`~~
+~~3. If cmake completes succesfully run `make`~~
+~~4. Run the executable made in the 'bin' folder~~
 ~~
-### Embedded (Raspberry Pi):
-0. Clone the project using `git` and then run `git submodule update --init --recursive` to download the required submodules.
-1. Install the libraries listed in 'build.linux'
-	* For things that are not in the package manager repository or too low of a version you have to download and build yourself
-	* SDL2 Can be installed using the instructions found [here](https://wiki.libsdl.org/Installation#Raspberry_Pi)
-2. Run `cmake -DEMBEDDED=ON -DCMAKE_BUILD_TYPE=Release .`
-3. If cmake completes succesfully run `make`
-4. Run the executable made in the 'bin' folder
-~~
+
+embedded WILL cause issues if compiled this way; embedded should not be considered supported, even on drewols main branch
