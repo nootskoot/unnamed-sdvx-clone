@@ -88,7 +88,7 @@ DSP *GameAudioEffect::CreateDSP(const TimingPoint &tp, float filterInput, uint32
 	{
 		RetriggerDSP *retriggerDSP = new RetriggerDSP(sampleRate);
 		retriggerDSP->SetMaxLength(maxLength);
-		retriggerDSP->SetLength(actualLength);
+		retriggerDSP->SetLength(duration.Sample(filterInput).AbsolutePrecise(noteDuration));
 		retriggerDSP->SetGating(retrigger.gate.Sample(filterInput));
 		retriggerDSP->SetResetDuration(retrigger.reset.Sample(filterInput).Absolute(noteDuration));
 		ret = retriggerDSP;
@@ -233,7 +233,7 @@ bool GameAudioEffect::UpdateDSP(DSP* dsp, const TimingPoint &tp, float filterInp
 	{
 		RetriggerDSP *retriggerDSP = static_cast<RetriggerDSP*>(dsp);
 		retriggerDSP->SetMaxLength(maxLength);
-		retriggerDSP->SetLength(actualLength);
+		retriggerDSP->SetLength(duration.Sample(filterInput).AbsolutePrecise(noteDuration));
 		retriggerDSP->SetGating(retrigger.gate.Sample(filterInput));
 		retriggerDSP->SetResetDuration(retrigger.reset.Sample(filterInput).Absolute(noteDuration));
 		ret = retriggerDSP;

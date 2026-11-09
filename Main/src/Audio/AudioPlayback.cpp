@@ -762,7 +762,7 @@ void AudioPlayback::m_SetLaserEffectParameter(float input)
 	{
 		m_laserDSP->mix = m_laserEffect.mix.Sample(input);
 		auto *rt = (RetriggerDSP *)m_laserDSP;
-		rt->SetLength(actualLength);
+		rt->SetLength(m_laserEffect.duration.Sample(input).AbsolutePrecise(noteDuration));
 		break;
 	}
 	default:

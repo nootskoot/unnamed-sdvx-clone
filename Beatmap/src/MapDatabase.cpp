@@ -91,6 +91,7 @@ public:
 	Map<int32, PracticeSetupIndex*> m_practiceSetups;
 	Vector<TableIndex> m_tables;
 	std::string m_favSignature;
+	std::chrono::steady_clock::time_point m_favLastFileScan{};
 	Vector<PackIndex> m_packs;
 
 	Map<String, ChartIndex*> m_chartsByHash;
@@ -1752,22 +1753,47 @@ private:
     void m_RefreshLocalFavTables(bool force = false)
     {
         namespace fs = std::filesystem;
+        // GetTables() can run frequently on the UI thread. Do not traverse a
+        // potentially large songs directory on every song-wheel interaction.
+        const auto now = std::chrono::steady_clock::now();
+        if (!force && m_favLastFileScan.time_since_epoch().count() != 0 &&
+            now - m_favLastFileScan < std::chrono::seconds(60)) return;
+        m_favLastFileScan = now;
+
         const fs::path favDir = fs::u8path(Path::Absolute("fav-tables").c_str());
+        std::vector<fs::path> songRoots;
+        for (const auto& root : m_searchPaths)
+            songRoots.push_back(fs::u8path(root.c_str()));
+        // Keep the existing runtime lists first, preserving their identifiers
+        // if another .fav under songs happens to share the same file stem.
+        std::vector<fs::path> favDirs{favDir};
+        favDirs.insert(favDirs.end(), songRoots.begin(), songRoots.end());
         std::vector<fs::path> favFiles;
         std::error_code ec;
-        if (fs::is_directory(favDir, ec))
+        for (const auto& dir : favDirs)
         {
-            for (const auto& entry : fs::directory_iterator(favDir,
-                    fs::directory_options::skip_permission_denied, ec))
+            ec.clear();
+            if (!fs::is_directory(dir, ec)) continue;
+            fs::recursive_directory_iterator it(dir,
+                fs::directory_options::skip_permission_denied, ec), end;
+            while (!ec && it != end)
             {
-                if (ec) break;
-                if (!entry.is_regular_file(ec)) continue;
-                std::string extension = entry.path().extension().u8string();
-                for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                if (extension == ".fav") favFiles.push_back(entry.path());
+                std::error_code entryError;
+                if (it->is_regular_file(entryError))
+                {
+                    std::string extension = it->path().extension().u8string();
+                    for (char& c : extension)
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (extension == ".fav") favFiles.push_back(it->path());
+                }
+                it.increment(ec);
             }
+            if (ec)
+                Logf("[FAV/DISCOVERY] Scan stopped inside %s: %s",
+                    Logger::Severity::Warning, dir.u8string().c_str(), ec.message().c_str());
         }
         std::sort(favFiles.begin(), favFiles.end());
+        favFiles.erase(std::unique(favFiles.begin(), favFiles.end()), favFiles.end());
         std::string signature;
         for (const auto& file : favFiles)
         {
@@ -1798,12 +1824,11 @@ private:
                 chartRecords.push_back({static_cast<std::uint64_t>(chart->id),
                     fs::u8path(chart->path.c_str())});
         }
-        std::vector<fs::path> songRoots;
-        for (const auto& root : m_searchPaths)
-            songRoots.push_back(fs::u8path(root.c_str()));
-
         usc_fav::Catalog catalog;
-        catalog.Refresh({favDir}, songRoots, chartRecords);
+        catalog.Refresh(favDirs, songRoots, chartRecords);
+        Logf("[FAV/DISCOVERY] %d list files across runtime folder and %d song roots; %d tables loaded",
+             Logger::Severity::Info, static_cast<int>(favFiles.size()),
+             static_cast<int>(songRoots.size()), static_cast<int>(catalog.Tables().size()));
         for (const auto& source : catalog.Tables())
         {
             TableIndex table;

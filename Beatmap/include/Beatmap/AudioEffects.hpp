@@ -53,6 +53,13 @@ public:
 	// pass in the whole note duration
 	uint32 Absolute(double noteDuration);
 
+    // Keep sub-millisecond periods until the DSP converts them to sample frames.
+    // Integer milliseconds accumulate audible phase error in long-lived loops.
+    double AbsolutePrecise(double noteDuration) const
+    {
+        return type == Time ? double(duration) : double(rate) * noteDuration;
+    }
+
 	// Either a float or integer value
 	union
 	{
