@@ -2307,6 +2307,14 @@ private:
 					{
 						mapValid = true;
 					}
+					else
+					{
+						Logf("[CHART/SCAN] Metadata loader rejected [%s]", Logger::Severity::Warning, f.first);
+					}
+				}
+				else
+				{
+					Logf("[CHART/SCAN] Cannot open chart file [%s]", Logger::Severity::Warning, f.first);
 				}
 
 				if(mapValid)

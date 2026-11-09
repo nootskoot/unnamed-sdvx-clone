@@ -344,6 +344,13 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
 
         uint32 lastPulse = 0;
         const J& note = Member(root, "note");
+        // Audio invocation is defined in chart pulses, not rounded milliseconds.
+        // Keep lane-local indexes while creating notes so dense event lists do
+        // not repeatedly scan every note (including subdivided laser curves).
+        struct FXHoldSpan { uint32 end; HoldObjectState* object; };
+        std::map<uint32, FXHoldSpan> fxHolds[2];
+        std::multimap<uint32, ButtonObjectState*> fxChips[2];
+        std::map<uint32, std::vector<LaserObjectState*>> slamsByPulse;
         // BT, FX: an integer is a chip; [pulse,length] is chip/hold.
         auto ReadButtons = [&](const char* key, int laneCount, int baseIndex) {
             const J& lanes = Items(note, key);
@@ -364,12 +371,14 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         obj->time = TimeAt(y);
                         obj->duration = std::max(MapTime(1), MapTime(TimeAt(y + len) - obj->time));
                         obj->index = uint8(baseIndex + i);
+                        if (baseIndex == 4) fxHolds[i].emplace(y, FXHoldSpan{y + len, obj});
                         m_visualTimes[*obj] = {ExactTimeAt(y), ExactTimeAt(y + len)};
                         m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*obj));
                     } else {
                         auto* obj = new ButtonObjectState();
                         obj->time = TimeAt(y);
                         obj->index = uint8(baseIndex + i);
+                        if (baseIndex == 4) fxChips[i].emplace(y, obj);
                         m_visualTimes[*obj] = {ExactTimeAt(y), ExactTimeAt(y + len)};
                         m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*obj));
                     }
@@ -452,6 +461,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     // A KSON camera pattern applies only to an actual same-pulse,
                     // same-direction laser slam; other laser events are unaffected.
                     if (instantaneous) {
+                        slamsByPulse[y0].push_back(obj);
                         const int direction = p1 > p0 ? 1 : (p1 < p0 ? -1 : 0);
                         const auto swing = swingAtPulse.find({y0,direction});
                         if(swing!=swingAtPulse.end()) obj->nativeSwing=swing->second;
@@ -712,20 +722,17 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     if(effect.type==EffectType::None && !call.name.empty()) continue;
                     HoldObjectState* hold=nullptr;
                     const double exact=ExactTimeAt(y);
-                    for(auto& object:m_objectStates) {
-                        if(object->type!=ObjectType::Hold) continue;
-                        auto* candidate=(HoldObjectState*)object.get();
-                        const auto times=GetVisualTimes(object.get());
-                        if(candidate->index==lane+4 && exact>=times.first-1e-6 && exact<times.second-1e-6) {
-                            hold=candidate; break;
-                        }
+                    auto span=fxHolds[lane].upper_bound(y);
+                    if(span!=fxHolds[lane].begin()) {
+                        --span;
+                        if(y<span->second.end) hold=span->second.object;
                     }
                     if(!hold) {
                         Logf("[KSON] FX event without a matching hold at pulse %u",Logger::Severity::Warning,y);
                         continue;
                     }
                     const auto times=GetVisualTimes(*hold);
-                    if(exact>times.first+1e-6) {
+                    if(y>span->first) {
                         // Preserve the hold chain when an effect starts mid-note.
                         const MapTime split=TimeAt(y), end=hold->time+hold->duration;
                         if(split<=hold->time || split>=end) {
@@ -740,6 +747,9 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         m_visualTimes[*hold]={times.first,exact};
                         m_visualTimes[*continuation]={exact,times.second};
                         m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*continuation));
+                        const uint32 endPulse=span->second.end;
+                        span->second.end=y;
+                        fxHolds[lane].emplace(y, FXHoldSpan{endPulse, continuation});
                         hold=continuation;
                     }
                     if(call.name.empty()) {hold->effectType=EffectType::None;hold->effectParams[0]=hold->effectParams[1]=-1;continue;}
@@ -784,12 +794,10 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                 for(const auto& event:sample.value()[lane]) {
                     const uint32 y=GetPulse(event.is_array()?event[0]:event);
                     const float volume=event.is_array() && event.size()>1?event[1].value("vol",1.0f):1.0f;
-                    for(auto& object:m_objectStates) {
-                        if(object->type!=ObjectType::Single) continue;
-                        auto* button=(ButtonObjectState*)object.get();
-                        if(button->index==lane+4 && std::abs(GetVisualTimes(object.get()).first-ExactTimeAt(y))<1e-6) {
-                            button->hasSample=true; button->sampleIndex=index; button->sampleVolume=volume;
-                        }
+                    const auto matches=fxChips[lane].equal_range(y);
+                    for(auto match=matches.first;match!=matches.second;++match) {
+                        auto* button=match->second;
+                        button->hasSample=true; button->sampleIndex=index; button->sampleVolume=volume;
                     }
                 }
         }
@@ -805,10 +813,10 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             else if(name=="slam_swing"||name=="swing")preset=2;
             else if(m_samplePaths.size()<255){sample=uint16(m_samplePaths.size());m_samplePaths.Add(name);}
             for(const auto& event:named.value()) {
-                const auto time=TimeAt(GetPulse(event));
-                for(auto& o:m_objectStates)if(o->type==ObjectType::Laser && o->time==time) {
-                    auto* laser=(LaserObjectState*)o.get();
-                    if(laser->flags&LaserObjectState::flag_Instant){laser->slamSound=preset;laser->slamSample=sample;}
+                const auto match=slamsByPulse.find(GetPulse(event));
+                if(match==slamsByPulse.end()) continue;
+                for(auto* laser:match->second) {
+                    laser->slamSound=preset;laser->slamSample=sample;
                 }
             }
         }

@@ -199,8 +199,15 @@ bool KShootMap::Init(BinaryStream& input, bool metadataOnly)
 			continue;
 		if (line.substr(0, 2).compare("//") == 0)
 			continue;
+		// The tick parser already accepts semicolon comments; the header should too.
+		if (line[0] == ';')
+			continue;
 		if(!line.Split("=", &k, &v))
+		{
+			Logf("[KSH/HEADER] Invalid header line %u (expected key=value): %s",
+				Logger::Severity::Warning, lineNumber, line);
 			return false;
+		}
 
 		settings.FindOrAdd(k) = v;
 	}
