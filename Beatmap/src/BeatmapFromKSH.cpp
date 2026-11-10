@@ -3,6 +3,8 @@
 #include "KShootMap.hpp"
 #include "KSH2Bridge.hpp"
 #include "KSHCompatibility.hpp"
+#include <cstdlib>
+#include <cstring>
 #include <cmath> // std::isfinite for malformed KSH tempo protection
 
 // Temporary object to keep track if a button is a hold button
@@ -451,18 +453,34 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
         line.clear();
     }
     input.Seek(start);
-    if (nativeKSH) {
+    // Experimental comparison mode, intentionally OFF by default.
+    // Do not route metadata scans through this path: fast song database scans
+    // and metadata behavior remain identical to the existing USC parser.
+    const char* libksonV1Setting = std::getenv("USC_LIBKSON_KSH1");
+    const bool tryLibksonV1 = !nativeKSH && !metadataOnly &&
+        libksonV1Setting && std::strcmp(libksonV1Setting, "1") == 0;
+
+    if (nativeKSH || tryLibksonV1) {
+        // Convert via libkson into the *existing* native KSON importer.
+        // No DSP, laser rendering, scoring, or playback changes.
+        const char* parserName = nativeKSH ? "KSH v2" : "KSH v1 [libkson]";
         const size_t size = input.GetSize() - start;
         if (size > 32 * 1024 * 1024) {
-            Log("KSH v2 chart exceeds the 32 MiB import limit", Logger::Severity::Warning);
+            Logf("%s chart exceeds the 32 MiB import limit", Logger::Severity::Warning, parserName);
             return false;
         }
         std::string source(size, '\0');
         if (input.Serialize(source.data(), size) != size) return false;
         std::string json, diagnostics;
         const bool converted = ConvertKSH2(source, json, diagnostics);
-        if (!diagnostics.empty()) Logf("KSH v2: %s", Logger::Severity::Warning, diagnostics.c_str());
-        if (!converted) return false;
+        if (!diagnostics.empty())
+            Logf("%s: %s", Logger::Severity::Warning, parserName, diagnostics.c_str());
+        if (!converted) {
+            Logf("%s conversion failed (no silent fallback)", Logger::Severity::Warning, parserName);
+            return false;
+        }
+        if (tryLibksonV1)
+            Log("[libkson] KSH v1 chart imported through experimental bridge", Logger::Severity::Info);
         auto bytes = std::make_shared<Buffer>(json.begin(), json.end());
         return m_ProcessKSON(Resource::FromBytes("converted.kson", bytes), metadataOnly);
     }
