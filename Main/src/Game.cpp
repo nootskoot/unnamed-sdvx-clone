@@ -888,7 +888,8 @@ public:
 		bool slowTilt = (rollL == -1 && rollR == 1) || (rollL == 0 && rollR == 0);
 		rollL = m_camera.GetRollIgnoreTimer(0) <= 0 ? m_scoring.GetLaserRollOutput(0) : 0;
 		rollR = m_camera.GetRollIgnoreTimer(1) <= 0 ? m_scoring.GetLaserRollOutput(1) : 0;
-		m_camera.SetKSHCompatibility(m_beatmap->GetMapSettings().kshBehaviorVersion,
+		m_camera.SetKSHCompatibility(m_beatmap->GetMapSettings().ksonCameraVersion >= 0
+            ? m_beatmap->GetMapSettings().ksonCameraVersion : m_beatmap->GetMapSettings().kshBehaviorVersion,
             m_beatmap->GetMapSettings().kshLegacyKeep);
         m_camera.SetTargetRoll(rollL + rollR);
 		m_camera.SetSlowTilt(slowTilt);

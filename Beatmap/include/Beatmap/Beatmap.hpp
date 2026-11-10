@@ -48,6 +48,7 @@ struct BeatmapSettings
 
 	// Initial audio settings
     // Runtime import metadata; deliberately not added to the legacy DB serializer.
+    int ksonCameraVersion = -1; // Runtime-only compatibility from converted KSON.
     int kshBehaviorVersion = -1; // -1: native KSON/default behavior
     bool kshLegacyKeep = false;
     bool slamAutoVolume = false;

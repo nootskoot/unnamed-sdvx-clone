@@ -111,7 +111,10 @@ private:
 	// Returns the track that should have effects applied to them
 	Ref<AudioStream> m_GetDSPTrack();
 	void m_CleanupDSP(class DSP *&ptr);
-	void m_SetLaserEffectParameter(float input);
+	void m_SetLaserEffectParameter(float input, class DSP* dsp);
+    void m_MirrorLaserDSP(class DSP* original, GameAudioEffect effect, float input, bool ordinary);
+    std::map<class DSP*, class DSP*> m_legacyDryDSPs;
+    bool m_singleF = false;
 	void m_PreRenderDSPTrack();
 
 	// Map player

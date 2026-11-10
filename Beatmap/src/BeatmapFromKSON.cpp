@@ -135,12 +135,24 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             m_settings.difficulty = uint8(std::max(0, std::min(3, meta["difficulty"].get<int>())));
         else if (meta.contains("difficulty") && meta["difficulty"].is_string())
             m_settings.difficulty = uint8(3); // KSM v2 maps all custom difficulty names to index 3.
+        const J cameraVersion = Member(root,"compat").value("ksh_version",J());
+        m_settings.ksonCameraVersion = -1;
+        if (cameraVersion.is_string()) {
+            const auto v=cameraVersion.get<std::string>();
+            if (v.size()>=3 && std::all_of(v.begin(),v.begin()+3,[](char c){return c>='0' && c<='9';})) {
+                const int parsed=std::stoi(v.substr(0,3));
+                if (parsed<200) m_settings.ksonCameraVersion=parsed;
+            }
+        }
         m_settings.audioNoFX = bgm.value("filename", std::string());
         m_settings.audioFX = "";
+        m_settings.audioLaserFX = "";
+        m_settings.audioCombinedFX = "";
         if (stems.contains("fp_filenames") && stems["fp_filenames"].is_array()) {
             const auto& files=stems["fp_filenames"];
-            // Complete F/P/FP sets can bypass both effect buses. Keep the
-            // existing switch_audio route for single-F converted charts.
+            // F-only uses live laser processing; complete F/P/FP bypasses it.
+            if (!files.empty() && files[0].is_string())
+                m_settings.audioFX=files[0].get<std::string>();
             if (files.size()>=3 && files[0].is_string() && files[1].is_string() && files[2].is_string()) {
                 m_settings.audioFX=files[0].get<std::string>();
                 m_settings.audioLaserFX=files[1].get<std::string>();
@@ -753,22 +765,26 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                     if(y>span->first) {
                         // Preserve the hold chain when an effect starts mid-note.
                         const MapTime split=TimeAt(y), end=hold->time+hold->duration;
-                        if(split<=hold->time || split>=end) {
+                        if(split>=end) {
                             Logf("[KSON] Sub-millisecond FX split cannot be represented at pulse %u",Logger::Severity::Warning,y);
                             continue;
                         }
-                        auto* continuation=new HoldObjectState(*hold);
-                        continuation->time=split; continuation->duration=end-split;
-                        continuation->prev=hold;
-                        if(hold->next) hold->next->prev=continuation;
-                        hold->next=continuation; hold->duration=split-hold->time;
-                        m_visualTimes[*hold]={times.first,exact};
-                        m_visualTimes[*continuation]={exact,times.second};
-                        m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*continuation));
-                        const uint32 endPulse=span->second.end;
-                        span->second.end=y;
-                        fxHolds[lane].emplace(y, FXHoldSpan{endPulse, continuation});
-                        hold=continuation;
+                        if (split > hold->time) {
+                            auto* continuation=new HoldObjectState(*hold);
+                            continuation->time=split; continuation->duration=end-split;
+                            continuation->prev=hold;
+                            if(hold->next) hold->next->prev=continuation;
+                            hold->next=continuation; hold->duration=split-hold->time;
+                            m_visualTimes[*hold]={times.first,exact};
+                            m_visualTimes[*continuation]={exact,times.second};
+                            m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*continuation));
+                            const uint32 endPulse=span->second.end;
+                            span->second.end=y;
+                            fxHolds[lane].emplace(y, FXHoldSpan{endPulse, continuation});
+                            hold=continuation;
+                        }
+                        // Same-ms calls share one gameplay interval. Keep the last
+                        // authored effect rather than discarding every later call.
                     }
                     if(call.name.empty()) {hold->effectType=EffectType::None;hold->effectParams[0]=hold->effectParams[1]=-1;continue;}
                     hold->effectType=EffectType(nextEffect++);
