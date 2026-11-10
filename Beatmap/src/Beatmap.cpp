@@ -16,6 +16,19 @@ bool Beatmap::Load(BinaryStream& input, bool metadataOnly)
 
 bool Beatmap::Load(const Resource& resource, bool metadataOnly)
 {
+	// Native KSON dispatch handles ordinary disk charts and in-memory resources.
+	// KSH loading remains exactly as before.
+	if (resource.IsValid())
+	{
+		const String& name = resource.IsPath() ? resource.GetPath() : resource.GetName();
+		if (name.size() >= 5)
+		{
+			String extension = name.substr(name.size() - 5);
+			extension.ToLower();
+			if (extension == ".kson")
+				return m_ProcessKSON(resource, metadataOnly);
+		}
+	}
 	if (resource.IsPath())
 	{
 		File file;
@@ -361,6 +374,8 @@ float Beatmap::GetBeatCount(MapTime start, MapTime end, TimingPointsIterator hin
 
 float Beatmap::GetBeatCountWithScrollSpeedApplied(MapTime start, MapTime end, TimingPointsIterator hint) const
 {
+    if (m_ksonScroll)
+        return float(m_ksonScroll->Position(end) - m_ksonScroll->Position(start));
 	int sign = 1;
 
 	if (m_timingPoints.empty() || start == end)
@@ -578,6 +593,7 @@ float Beatmap::GetCenterSplitValueAt(MapTime mapTime) const
 
 float Beatmap::GetScrollSpeedAt(MapTime mapTime) const
 {
+    if (m_ksonScroll) return float(m_ksonScroll->Speed(mapTime));
 	return static_cast<float>(m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED).ValueAt(mapTime));
 }
 

@@ -6,11 +6,16 @@ class LaserTrackBuilder
 public:
 	LaserTrackBuilder(class OpenGL* gl, class Track* track, uint32 laserIndex);
 	void Reset();
+    float SlamLength(class BeatmapPlayback& playback, LaserObjectState* laser);
 	void Update(MapTime newTime);
 
 	// Generates a normal segment
 	[[nodiscard]]
 	Mesh GenerateTrackMesh(class BeatmapPlayback& playback, LaserObjectState* laser);
+	// Draw-time camera-relative clip for extreme and reverse-scrolling KSON lasers.
+	[[nodiscard]]
+	Mesh GenerateClippedTrackMesh(class BeatmapPlayback& playback, LaserObjectState* laser,
+		float clipMinY, float clipMaxY);
 
 	// Generate the starting segment of a laser
 	[[nodiscard]]
@@ -56,8 +61,13 @@ private:
 	float effectiveWidth;
 
 private:
+	// Internal shared mesh generation: clipping is applied to the original USC
+	// triangles and does not change the ordinary/cached KSH rendering path.
+	Mesh GenerateTrackMeshInternal(class BeatmapPlayback& playback, LaserObjectState* laser,
+		bool clip, float clipMinY, float clipMaxY);
 	void m_RecalculateConstants();
 	void m_Cleanup(MapTime newTime, Map<LaserObjectState*, Mesh>& arr);
+    bool m_nativeCache = false;
 	class OpenGL* m_gl;
 	class Track* m_track;
 

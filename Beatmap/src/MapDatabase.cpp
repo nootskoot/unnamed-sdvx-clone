@@ -1,5 +1,11 @@
 #include "stdafx.h"
 #include "MapDatabase.hpp"
+#include "FavTableCatalog.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
+#include <vector>
 #include "Database.hpp"
 #include "Beatmap.hpp"
 #include "TinySHA1.hpp"
@@ -14,10 +20,55 @@
 #include <atomic>
 #include <iostream>
 #include <fstream>
+#include <cstdlib>
 #include <condition_variable>
 using std::thread;
 using std::mutex;
 using namespace std;
+
+// A same-stem ver=200 KSH can be a metadata-only KSON alias. Skip it only
+// when its body contains nothing beyond the expected empty placeholder row.
+// Never hide a real note-bearing KSH, even if its version is >= 200.
+static bool KSONHasCompanionStub(const String& kshPath)
+{
+    if (kshPath.size() < 4) return false;
+    const String ksonPath = kshPath.substr(0, kshPath.size() - 4) + ".kson";
+    if (!Path::FileExists(ksonPath)) return false;
+    std::ifstream input(*kshPath, std::ios::binary);
+    if (!input) return false;
+
+    bool inHeader = true;
+    bool version200 = false;
+    bool sawEmptyRow = false;
+    std::string line;
+    int count = 0;
+    while (count++ < 256 && std::getline(input, line))
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        if (inHeader)
+        {
+            if (line == "--") { inHeader = false; continue; }
+            if (line.compare(0, 4, "ver=") == 0)
+            {
+                const char* raw = line.c_str() + 4;
+                char* end = nullptr;
+                const long version = std::strtol(raw, &end, 10);
+                version200 = end != raw && version >= 200;
+            }
+            continue;
+        }
+        if (line == "--") continue;
+        if (line == "0000|00|--") { sawEmptyRow = true; continue; }
+        if (line.compare(0, 2, "//") == 0 || line[0] == '#'
+            || line.compare(0, 5, "beat=") == 0
+            || line.compare(0, 5, "tilt=") == 0)
+            continue;
+        // Any other body data might represent playable content.
+        return false;
+    }
+    return !inHeader && version200 && sawEmptyRow && input.eof();
+}
 
 class MapDatabase_Impl
 {
@@ -39,6 +90,8 @@ public:
 	Map<int32, ChallengeIndex*> m_challenges;
 	Map<int32, PracticeSetupIndex*> m_practiceSetups;
 	Vector<TableIndex> m_tables;
+	std::string m_favSignature;
+	std::chrono::steady_clock::time_point m_favLastFileScan{};
 	Vector<PackIndex> m_packs;
 
 	Map<String, ChartIndex*> m_chartsByHash;
@@ -783,6 +836,11 @@ public:
 
 	const Vector<TableIndex>& GetTables() const
 	{
+		// Do not resolve .fav entries against the empty chart index before
+		// StartSearching()/m_LoadInitialData() has loaded the database.
+		// The full refresh still runs after database initialization and updates.
+		if (!m_charts.empty())
+			const_cast<MapDatabase_Impl*>(this)->m_RefreshLocalFavTables();
 		return m_tables;
 	}
 	const Vector<PackIndex>& GetPacks() const
@@ -1236,6 +1294,7 @@ public:
 		}
 		m_database.Exec("END");
 
+		m_RefreshLocalFavTables(true);
 		// Fire events
 		if(!removeChartEvents.empty())
 		{
@@ -1688,6 +1747,140 @@ private:
 			"settings TEXT"
 			")");
 	}
+
+    // Local .fav files are read-only difficulty lists, not folder-wide favorites.
+    // They join USC's existing TableIndex interface; no schema changes or chart copies.
+    void m_RefreshLocalFavTables(bool force = false)
+    {
+        namespace fs = std::filesystem;
+        // GetTables() can run frequently on the UI thread. Do not traverse a
+        // potentially large songs directory on every song-wheel interaction.
+        const auto now = std::chrono::steady_clock::now();
+        if (!force && m_favLastFileScan.time_since_epoch().count() != 0 &&
+            now - m_favLastFileScan < std::chrono::seconds(60)) return;
+        m_favLastFileScan = now;
+
+        const fs::path favDir = fs::u8path(Path::Absolute("fav-tables").c_str());
+        std::vector<fs::path> songRoots;
+        for (const auto& root : m_searchPaths)
+            songRoots.push_back(fs::u8path(root.c_str()));
+        // Keep the existing runtime lists first, preserving their identifiers
+        // if another .fav under songs happens to share the same file stem.
+        std::vector<fs::path> favDirs{favDir};
+        favDirs.insert(favDirs.end(), songRoots.begin(), songRoots.end());
+        std::vector<fs::path> favFiles;
+        std::error_code ec;
+        for (const auto& dir : favDirs)
+        {
+            ec.clear();
+            if (!fs::is_directory(dir, ec)) continue;
+            fs::recursive_directory_iterator it(dir,
+                fs::directory_options::skip_permission_denied, ec), end;
+            while (!ec && it != end)
+            {
+                std::error_code entryError;
+                if (it->is_regular_file(entryError))
+                {
+                    std::string extension = it->path().extension().u8string();
+                    for (char& c : extension)
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (extension == ".fav") favFiles.push_back(it->path());
+                }
+                it.increment(ec);
+            }
+            if (ec)
+                Logf("[FAV/DISCOVERY] Scan stopped inside %s: %s",
+                    Logger::Severity::Warning, dir.u8string().c_str(), ec.message().c_str());
+        }
+        std::sort(favFiles.begin(), favFiles.end());
+        favFiles.erase(std::unique(favFiles.begin(), favFiles.end()), favFiles.end());
+        std::string signature;
+        for (const auto& file : favFiles)
+        {
+            signature += file.u8string();
+            const auto stamp = fs::last_write_time(file, ec);
+            if (!ec) signature += std::to_string(stamp.time_since_epoch().count());
+            ec.clear();
+            const auto size = fs::file_size(file, ec);
+            if (!ec) signature += std::to_string(size);
+            ec.clear();
+            signature.push_back('\n');
+        }
+        if (!force && signature == m_favSignature) return;
+        m_favSignature = signature;
+
+        // Drop only previously materialized .fav tables, not installed tables.
+        m_tables.erase(std::remove_if(m_tables.begin(), m_tables.end(),
+            [](const TableIndex& t) { return t.url.rfind("fav://local/", 0) == 0; }),
+            m_tables.end());
+        if (favFiles.empty()) return;
+
+        std::vector<usc_fav::ChartRecord> chartRecords;
+        chartRecords.reserve(m_charts.size());
+        for (const auto& record : m_charts)
+        {
+            const ChartIndex* chart = record.second;
+            if (chart && chart->backbeat_bundle_id.empty() && !chart->path.empty())
+                chartRecords.push_back({static_cast<std::uint64_t>(chart->id),
+                    fs::u8path(chart->path.c_str())});
+        }
+        usc_fav::Catalog catalog;
+        catalog.Refresh(favDirs, songRoots, chartRecords);
+        Logf("[FAV/DISCOVERY] %d list files across runtime folder and %d song roots; %d tables loaded",
+             Logger::Severity::Info, static_cast<int>(favFiles.size()),
+             static_cast<int>(songRoots.size()), static_cast<int>(catalog.Tables().size()));
+        for (const auto& source : catalog.Tables())
+        {
+            TableIndex table;
+            table.url = "fav://local/" + source.name;
+            table.name = "KSM " + source.name;
+            // Human-readable .fav label; keep stable fav://local/ table URL and name.
+            std::string friendlyName = source.name;
+            for (std::size_t i = 0; i < friendlyName.size(); ++i)
+            {
+                if (friendlyName[i] == '_')
+                {
+                    friendlyName[i] = ' ';
+                    if (i + 1 < friendlyName.size() &&
+                        friendlyName[i + 1] >= 'a' && friendlyName[i + 1] <= 'z')
+                        friendlyName[i + 1] = static_cast<char>(friendlyName[i + 1] - ('a' - 'A'));
+                }
+            }
+            // KSM OS levels are named os10, os10_unique, etc.
+            const bool isOsLevel = friendlyName.size() > 2 &&
+                (friendlyName[0] == 'o' || friendlyName[0] == 'O') &&
+                (friendlyName[1] == 's' || friendlyName[1] == 'S') &&
+                friendlyName[2] >= '0' && friendlyName[2] <= '9';
+            TableSectionIndex section;
+            if (isOsLevel)
+            {
+                table.symbol = "OS";
+                section.name = friendlyName.substr(2);
+            }
+            else
+            {
+                // For generic .fav lists, show one clean title with no double prefix.
+                if (!friendlyName.empty() && friendlyName[0] >= 'a' && friendlyName[0] <= 'z')
+                    friendlyName[0] = static_cast<char>(friendlyName[0] - ('a' - 'A'));
+                table.symbol = friendlyName;
+                section.name = "";
+            }
+            for (const auto& entry : source.entries)
+                if (entry.matched && entry.chartId <= INT32_MAX)
+                    section.chartIds.Add(static_cast<int32>(entry.chartId));
+            table.levels.push_back(std::move(section));
+            m_tables.push_back(std::move(table));
+            Logf("[FAV] %s: %d/%d charts matched, %d missing, %d ambiguous",
+                 Logger::Severity::Info, source.name.c_str(),
+                 static_cast<int>(source.chartIds.size()),
+                 static_cast<int>(source.entries.size()),
+                 static_cast<int>(source.missing), static_cast<int>(source.ambiguous));
+        }
+        // Full paths of missing/ambiguous entries are available in the diagnostics.
+        for (const auto& diagnostic : catalog.Diagnostics())
+            Logf("[FAV] %s", Logger::Severity::Warning, diagnostic.c_str());
+    }
+
 	void m_LoadInitialData()
 	{
 		assert(!m_searching);
@@ -1920,6 +2113,7 @@ private:
 				section.chartIds.Add(chartId);
 		}
 
+		m_RefreshLocalFavTables(true);
 		DBStatement packScan = m_database.Query(
 			"SELECT pack_url,pack_name,chart_id FROM PackCharts "
 			"ORDER BY pack_name,pack_url,chart_index");
@@ -2035,14 +2229,20 @@ private:
 			m_outer.OnSearchStatusUpdated.Call("[START] Chart Database - Enumerate Files and Folders");
 			for(String rootSearchPath : m_searchPaths)
 			{
-				Vector<String> exts(3);
+				Vector<String> exts(4);
 				exts[0] = "ksh";
-				exts[1] = "chal";
-				exts[2] = "kco";
+				exts[1] = "kson";
+				exts[2] = "chal";
+				exts[3] = "kco";
 				Map<String, Vector<FileInfo>> files = Files::ScanFilesRecursive(rootSearchPath, exts, &m_interruptSearch);
 				if(m_interruptSearch)
 					return;
 				for(FileInfo& fi : files["ksh"])
+				{
+					if (KSONHasCompanionStub(fi.fullPath)) continue;
+					fileList.Add(fi.fullPath, fi);
+				}
+				for(FileInfo& fi : files["kson"])
 				{
 					fileList.Add(fi.fullPath, fi);
 				}
@@ -2126,12 +2326,20 @@ private:
 				Beatmap map;
 				if(fileStream.OpenRead(f.first))
 				{
-					FileReader reader(fileStream);
-
-					if(map.Load(reader, true))
+					// The resource path dispatches KSON to its JSON loader and KSH
+					// to its existing parser. Keep the open file for SHA-1 hashing.
+					if(map.Load(Resource::FromPath(f.first), true))
 					{
 						mapValid = true;
 					}
+					else
+					{
+						Logf("[CHART/SCAN] Metadata loader rejected [%s]", Logger::Severity::Warning, f.first);
+					}
+				}
+				else
+				{
+					Logf("[CHART/SCAN] Cannot open chart file [%s]", Logger::Severity::Warning, f.first);
 				}
 
 				if(mapValid)

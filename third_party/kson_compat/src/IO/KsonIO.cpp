@@ -1,0 +1,2850 @@
+#ifndef KSON_WITHOUT_JSON_DEPENDENCY
+#include "kson/IO/KsonIO.hpp"
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <limits>
+#include <cmath>
+
+namespace
+{
+	using namespace kson;
+
+	// Maximum value of BPM
+	constexpr double kBPMMax = 65535.0;
+
+	std::filesystem::path U8Path(const std::string& utf8Str)
+	{
+		return std::filesystem::path(
+			std::u8string_view(reinterpret_cast<const char8_t*>(utf8Str.data()), utf8Str.size()));
+	}
+
+	// Note: Since to_json() overload makes it difficult to find minor bugs
+	//       (e.g., ByPulse<T> shouldn't be converted as std::map, Pulse and RelPulse shouldn't be the same),
+	//       we write our own conversion functions here.
+
+#ifdef __cpp_concepts
+	template <class T>
+	concept Serializable = requires (nlohmann::json & json, const T & d)
+	{
+		json = d;
+	};
+#endif
+
+	void Write(nlohmann::json& json, const char* key, nlohmann::json&& value)
+	{
+		if (!value.is_object() || !value.empty())
+		{
+			json.emplace(key, std::move(value)); // Note: json becomes object if it is null
+		}
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T>
+#else
+	template <typename T>
+#endif
+	void Write(nlohmann::json& json, const char* key, const T& value)
+	{
+		if constexpr (
+			std::is_same_v<T, std::string> ||
+			std::is_integral_v<T>)
+		{
+			json.emplace(key, value);
+		}
+		else if constexpr (std::is_floating_point_v<T>)
+		{
+			json.emplace(key, RemoveFloatingPointError(value));
+		}
+		else if constexpr (std::is_same_v<T, nlohmann::json>)
+		{
+			if (!value.is_object() || !value.empty())
+			{
+				json.emplace(key, value);
+			}
+		}
+		else
+		{
+			nlohmann::json valueJSON = value;
+			if (!valueJSON.is_object() || !valueJSON.empty())
+			{
+				json.emplace(key, std::move(valueJSON));
+			}
+		}
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T, typename U>
+#else
+	template <typename T, typename U>
+#endif
+	void Write(nlohmann::json& json, const char* key, const T& value, const U& defaultValue)
+	{
+		if constexpr (std::is_floating_point_v<T>)
+		{
+			static_assert(std::is_same_v<T, U>);
+
+			if (!AlmostEquals(value, defaultValue))
+			{
+				Write(json, key, value);
+			}
+		}
+		else
+		{
+			if (value != defaultValue)
+			{
+				Write(json, key, value);
+			}
+		}
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T>
+#else
+	template <typename T>
+#endif
+	void WriteByPulseElement(nlohmann::json& arrayJSON, Pulse y, const T& value) // Note: y could be ry
+	{
+		if constexpr (
+			std::is_same_v<T, std::string> ||
+			std::is_integral_v<T>)
+		{
+			arrayJSON.push_back(nlohmann::json::array({ y, value }));
+		}
+		else if constexpr (std::is_floating_point_v<T>)
+		{
+			arrayJSON.push_back(nlohmann::json::array({ y, RemoveFloatingPointError(value) }));
+		}
+		else if constexpr (std::is_same_v<T, nlohmann::json>)
+		{
+			if (value.is_object() && value.empty())
+			{
+				arrayJSON.push_back(y);
+			}
+			else
+			{
+				arrayJSON.push_back(nlohmann::json::array({ y, value }));
+			}
+		}
+		else
+		{
+			nlohmann::json valueJSON = value;
+			if (valueJSON.is_object() && valueJSON.empty())
+			{
+				arrayJSON.push_back(y);
+			}
+			else
+			{
+				arrayJSON.push_back(nlohmann::json::array({ y, std::move(valueJSON) }));
+			}
+		}
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T, typename U>
+#else
+	template <typename T, typename U>
+#endif
+	void WriteByPulseElement(nlohmann::json& arrayJSON, Pulse y, const T& value, const U& defaultValue) // Note: y could be ry
+	{
+		if constexpr (
+			std::is_same_v<T, std::string> ||
+			std::is_integral_v<T>)
+		{
+			if (value == defaultValue)
+			{
+				arrayJSON.push_back(y);
+			}
+			else
+			{
+				arrayJSON.push_back(nlohmann::json::array({ y, value }));
+			}
+		}
+		else if constexpr (std::is_floating_point_v<T>)
+		{
+			static_assert(std::is_same_v<T, U>);
+			
+			if (AlmostEquals(value, defaultValue))
+			{
+				arrayJSON.push_back(y);
+			}
+			else
+			{
+				arrayJSON.push_back(nlohmann::json::array({ y, RemoveFloatingPointError(value) }));
+			}
+		}
+		else
+		{
+			if (value == defaultValue)
+			{
+				arrayJSON.push_back(y);
+			}
+			else
+			{
+				// Pass to a no-default-value version of WriteByPulseElement in order to skip empty objects and empty arrays in addition to the defaults
+				WriteByPulseElement(arrayJSON, y, value);
+			}
+		}
+	}
+
+	void WriteGraphPoint(nlohmann::json& graphJSON, Pulse y, const GraphPoint& point) // Note: y could be ry
+	{
+		const bool hasCurve = !point.curve.isLinear();
+		const bool hasGraphValue = !AlmostEquals(point.v.v, point.v.vf);
+
+		if (!hasCurve)
+		{
+			// No curve: [y, v] or [y, [v, vf]]
+			if (hasGraphValue)
+			{
+				graphJSON.push_back(nlohmann::json::array({ y, nlohmann::json::array({ RemoveFloatingPointError(point.v.v), RemoveFloatingPointError(point.v.vf) }) }));
+			}
+			else
+			{
+				graphJSON.push_back(nlohmann::json::array({ y, RemoveFloatingPointError(point.v.v) }));
+			}
+		}
+		else
+		{
+			// With curve: [y, v, [a, b]] or [y, [v, vf], [a, b]]
+			nlohmann::json curveArray = nlohmann::json::array({ RemoveFloatingPointError(point.curve.a), RemoveFloatingPointError(point.curve.b) });
+
+			if (hasGraphValue)
+			{
+				graphJSON.push_back(nlohmann::json::array({ y, nlohmann::json::array({ RemoveFloatingPointError(point.v.v), RemoveFloatingPointError(point.v.vf) }), curveArray }));
+			}
+			else
+			{
+				graphJSON.push_back(nlohmann::json::array({ y, RemoveFloatingPointError(point.v.v), curveArray }));
+			}
+		}
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T>
+#else
+	template <typename T>
+#endif
+	void WriteByPulse(nlohmann::json& json, const char* key, const ByPulse<T>& byPulse)
+	{
+		if (byPulse.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (const auto& [y, v] : byPulse)
+		{
+			WriteByPulseElement(j, y, v);
+		}
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T>
+#else
+	template <typename T>
+#endif
+	void WriteByPulse(nlohmann::json& json, const char* key, const ByPulse<T>& byPulse, const T& defaultValue)
+	{
+		bool allDefaultOrEmpty = true;
+		for (const auto& [y, v] : byPulse)
+		{
+			if constexpr (std::is_floating_point_v<T>)
+			{
+				if (!AlmostEquals(v, defaultValue))
+				{
+					allDefaultOrEmpty = false;
+					break;
+				}
+			}
+			else
+			{
+				if (v != defaultValue)
+				{
+					allDefaultOrEmpty = false;
+					break;
+				}
+			}
+		}
+		if (allDefaultOrEmpty)
+		{
+			return;
+		}
+
+		WriteByPulse(json, key, byPulse);
+	}
+
+#ifdef __cpp_concepts
+	template <Serializable T>
+#else
+	template <typename T>
+#endif
+	void WriteByPulseMulti(nlohmann::json& json, const char* key, const ByPulseMulti<T>& byPulse)
+	{
+		if (byPulse.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (const auto& [y, v] : byPulse)
+		{
+			WriteByPulseElement(j, y, v);
+		}
+	}
+
+	void WriteTimeSigByMeasureIdx(nlohmann::json& json, const char* key, const ByMeasureIdx<TimeSig>& byMeasureIdx)
+	{
+		if (byMeasureIdx.empty())
+		{
+			return;
+		}
+
+		// Skip if only default value [[0, [4, 4]]]
+		if (byMeasureIdx.size() == 1 &&
+			byMeasureIdx.contains(0) &&
+			byMeasureIdx.at(0).n == 4 &&
+			byMeasureIdx.at(0).d == 4)
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (const auto& [idx, timeSig] : byMeasureIdx)
+		{
+			j.push_back(nlohmann::json::array({
+				idx,
+				nlohmann::json::array({ timeSig.n, timeSig.d }),
+			}));
+		}
+	}
+
+	template <std::size_t N>
+	void WriteButtonLanes(nlohmann::json& json, const char* key, const std::array<ByPulse<Interval>, N>& lanes)
+	{
+		// Skip if empty
+		bool allEmpty = true;
+		for (std::size_t i = 0U; i < N; ++i)
+		{
+			if (!lanes[i].empty())
+			{
+				allEmpty = false;
+				break;
+			}
+		}
+		if (allEmpty)
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (std::size_t i = 0U; i < N; ++i)
+		{
+			nlohmann::json& a = j.emplace_back(nlohmann::json::array());
+			for (const auto& [y, interval] : lanes[i])
+			{
+				WriteByPulseElement(a, y, interval.length, 0);
+			}
+		}
+	}
+
+	void WriteLaserLanes(nlohmann::json& json, const char* key, const LaserLane<LaserSection>& lanes)
+	{
+		// Skip if empty
+		bool allEmpty = true;
+		for (std::size_t i = 0U; i < kNumLaserLanesSZ; ++i)
+		{
+			if (!lanes[i].empty())
+			{
+				allEmpty = false;
+				break;
+			}
+		}
+		if (allEmpty)
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		for (std::size_t i = 0U; i < kNumLaserLanesSZ; ++i)
+		{
+			nlohmann::json& laneJSON = j.emplace_back(nlohmann::json::array());
+			for (const auto& [y, laserSection] : lanes[i])
+			{
+				if (laserSection.v.empty())
+				{
+					continue;
+				}
+
+				nlohmann::json a = nlohmann::json::array();
+				for (const auto& [ry, v] : laserSection.v)
+				{
+					WriteGraphPoint(a, ry, v);
+				}
+				if (laserSection.w == kLaserXScale1x)
+				{
+					laneJSON.push_back(nlohmann::json::array({ y, std::move(a) }));
+				}
+				else
+				{
+					laneJSON.push_back(nlohmann::json::array({ y, std::move(a), laserSection.w }));
+				}
+			}
+		}
+	}
+
+	void WriteGraph(nlohmann::json& json, const char* key, const Graph& graph)
+	{
+		if (graph.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (const auto& [y, v] : graph)
+		{
+			WriteGraphPoint(j, y, v);
+		}
+	}
+
+	void WriteGraph(nlohmann::json& json, const char* key, const Graph& graph, double defaultValue)
+	{
+		bool allDefaultOrEmpty = true;
+		for (const auto& [y, point] : graph)
+		{
+			if (!AlmostEquals(point.v.v, defaultValue) || !AlmostEquals(point.v.vf, defaultValue))
+			{
+				allDefaultOrEmpty = false;
+				break;
+			}
+		}
+		if (allDefaultOrEmpty)
+		{
+			return;
+		}
+
+		WriteGraph(json, key, graph);
+	}
+
+	void WriteAudioEffectDef(nlohmann::json& json, const char* key, const std::vector<AudioEffectDefKVP>& def)
+	{
+		if (def.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		for (const auto& kvp : def)
+		{
+			nlohmann::json defJSON = {
+				{ "type", AudioEffectTypeToStr(kvp.v.type) },
+			};
+			Write(defJSON, "v", kvp.v.v);
+			j.push_back(nlohmann::json::array({ kvp.name, std::move(defJSON) }));
+		}
+	}
+
+	void WriteAudioEffectParamChange(nlohmann::json& json, const char* key, const Dict<Dict<ByPulse<std::string>>>& paramChange)
+	{
+		if (paramChange.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j1 = json[key];
+		for (const auto& [audioEffectName, params] : paramChange)
+		{
+			if (params.empty())
+			{
+				continue;
+			}
+
+			nlohmann::json& j2 = j1[audioEffectName];
+			for (const auto& [paramName, byPulse] : params)
+			{
+				WriteByPulse(j2, paramName.c_str(), byPulse);
+			}
+		}
+	}
+
+	void WriteCamPatternInvokeSpinByPulse(nlohmann::json& json, const char* key, const ByPulse<CamPatternInvokeSpin>& byPulse)
+	{
+		if (byPulse.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (const auto& [y, invoke] : byPulse)
+		{
+			j.push_back(nlohmann::json::array({ y, invoke.d, invoke.length }));
+		}
+	}
+
+	void WriteCamPatternInvokeSwingByPulse(nlohmann::json& json, const char* key, const ByPulse<CamPatternInvokeSwing>& byPulse)
+	{
+		if (byPulse.empty())
+		{
+			return;
+		}
+
+		nlohmann::json& j = json[key];
+		j = nlohmann::json::array();
+		for (const auto& [y, invoke] : byPulse)
+		{
+			nlohmann::json vJSON = nlohmann::json::object();
+			{
+				Write(vJSON, "scale", invoke.v.scale, 250.0);
+				Write(vJSON, "repeat", invoke.v.repeat, 3);
+				Write(vJSON, "decay_order", invoke.v.decayOrder, 2);
+			}
+			if (vJSON.empty())
+			{
+				j.push_back(nlohmann::json::array({ y, invoke.d, invoke.length }));
+			}
+			else
+			{
+				j.push_back(nlohmann::json::array({ y, invoke.d, invoke.length, std::move(vJSON) }));
+			}
+		}
+	}
+
+	nlohmann::json ToJSON(const MetaInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		Write(j, "title", d.title);
+		Write(j, "title_translit", d.titleTranslit, "");
+		Write(j, "title_img_filename", d.titleImgFilename, "");
+		Write(j, "artist", d.artist);
+		Write(j, "artist_translit", d.artistTranslit, "");
+		Write(j, "artist_img_filename", d.artistImgFilename, "");
+		Write(j, "chart_author", d.chartAuthor);
+		if (d.difficulty.name.empty())
+		{
+			Write(j, "difficulty", d.difficulty.idx);
+		}
+		else
+		{
+			Write(j, "difficulty", d.difficulty.name);
+		}
+		Write(j, "level", d.level);
+		Write(j, "disp_bpm", d.dispBPM, "");
+		Write(j, "std_bpm", d.stdBPM, 0.0);
+		Write(j, "jacket_filename", d.jacketFilename, "");
+		Write(j, "jacket_author", d.jacketAuthor, "");
+		Write(j, "icon_filename", d.iconFilename, "");
+		Write(j, "information", d.information, "");
+		return j;
+	}
+
+	nlohmann::json ToJSON(const BeatInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		WriteByPulse(j, "bpm", d.bpm);
+		WriteTimeSigByMeasureIdx(j, "time_sig", d.timeSig);
+		WriteGraph(j, "scroll_speed", d.scrollSpeed, 1.0);
+		WriteByPulse(j, "stop", d.stop);
+		return j;
+	}
+
+	nlohmann::json ToJSON(const GaugeInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		Write(j, "total", d.total, 0);
+		return j;
+	}
+
+	nlohmann::json ToJSON(const NoteInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		WriteButtonLanes(j, "bt", d.bt);
+		WriteButtonLanes(j, "fx", d.fx);
+		WriteLaserLanes(j, "laser", d.laser);
+		return j;
+	}
+
+	nlohmann::json ToJSON(const AudioInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		{
+			nlohmann::json bgmJSON = nlohmann::json::object();
+			Write(bgmJSON, "filename", d.bgm.filename, "");
+			Write(bgmJSON, "vol", d.bgm.vol, 1.0);
+			Write(bgmJSON, "offset", d.bgm.offset, 0);
+			{
+				nlohmann::json previewJSON = nlohmann::json::object();
+				Write(previewJSON, "offset", d.bgm.preview.offset);
+				Write(previewJSON, "duration", d.bgm.preview.duration);
+				Write(bgmJSON, "preview", std::move(previewJSON));
+			}
+			{
+				nlohmann::json legacyJSON = nlohmann::json::object();
+				if (!d.bgm.legacy.empty())
+				{
+					Write(legacyJSON, "fp_filenames", d.bgm.legacy.toStrArray());
+				}
+				Write(bgmJSON, "legacy", std::move(legacyJSON));
+			}
+			Write(j, "bgm", std::move(bgmJSON));
+		}
+		{
+			nlohmann::json keySoundJSON = nlohmann::json::object();
+			{
+				nlohmann::json fxJSON = nlohmann::json::object();
+				{
+					nlohmann::json chipEventJSON = nlohmann::json::object();
+					for (const auto& [filename, lanes] : d.keySound.fx.chipEvent)
+					{
+						bool isEmpty = true;
+						for (const auto& lane : lanes)
+						{
+							if (!lane.empty())
+							{
+								isEmpty = false;
+								break;
+							}
+						}
+						if (isEmpty)
+						{
+							continue;
+						}
+
+						nlohmann::json lanesJSON = nlohmann::json::array();
+						for (const auto& lane : lanes)
+						{
+							nlohmann::json laneJSON = nlohmann::json::array();
+							for (const auto& [y, v] : lane)
+							{
+								nlohmann::json vJSON = nlohmann::json::object();
+								{
+									Write(vJSON, "vol", v.vol, 1.0);
+								}
+								WriteByPulseElement(laneJSON, y, vJSON);
+							}
+							lanesJSON.push_back(std::move(laneJSON));
+						}
+						chipEventJSON.emplace(filename, std::move(lanesJSON));
+					}
+					Write(fxJSON, "chip_event", std::move(chipEventJSON));
+				}
+				Write(keySoundJSON, "fx", std::move(fxJSON));
+			}
+			{
+				nlohmann::json laserJSON = nlohmann::json::object();
+				WriteByPulse(laserJSON, "vol", d.keySound.laser.vol, 0.5);
+				{
+					nlohmann::json slamEventJSON = nlohmann::json::object();
+					for (const auto& [filename, pulseSet] : d.keySound.laser.slamEvent)
+					{
+						if (pulseSet.empty())
+						{
+							continue;
+						}
+
+						nlohmann::json& pulseSetJSON = slamEventJSON[filename];
+						pulseSetJSON = nlohmann::json::array();
+						for (const auto& y : pulseSet)
+						{
+							pulseSetJSON.push_back(y);
+						}
+					}
+					Write(laserJSON, "slam_event", std::move(slamEventJSON));
+				}
+				{
+					nlohmann::json legacy = nlohmann::json::object();
+					Write(legacy, "vol_auto", d.keySound.laser.legacy.volAuto, false);
+					Write(laserJSON, "legacy", std::move(legacy));
+				}
+				Write(keySoundJSON, "laser", std::move(laserJSON));
+			}
+			Write(j, "key_sound", std::move(keySoundJSON));
+		}
+		{
+			nlohmann::json audioEffectJSON = nlohmann::json::object();
+			{
+				nlohmann::json fxJSON = nlohmann::json::object();
+				WriteAudioEffectDef(fxJSON, "def", d.audioEffect.fx.def);
+				WriteAudioEffectParamChange(fxJSON, "param_change", d.audioEffect.fx.paramChange);
+				{
+					nlohmann::json longEventJSON = nlohmann::json::object();
+					for (const auto& [audioEffectName, lanes] : d.audioEffect.fx.longEvent)
+					{
+						bool isEmpty = true;
+						for (const auto& lane : lanes)
+						{
+							if (!lane.empty())
+							{
+								isEmpty = false;
+								break;
+							}
+						}
+						if (isEmpty)
+						{
+							continue;
+						}
+
+						nlohmann::json& lanesJSON = longEventJSON[audioEffectName];
+						for (const auto& lane : lanes)
+						{
+							nlohmann::json& laneJSON = lanesJSON.emplace_back(nlohmann::json::array());
+							for (const auto& [y, v] : lane)
+							{
+								WriteByPulseElement(laneJSON, y, v);
+							}
+						}
+					}
+					Write(fxJSON, "long_event", std::move(longEventJSON));
+				}
+				Write(audioEffectJSON, "fx", std::move(fxJSON));
+			}
+			{
+				nlohmann::json laserJSON = nlohmann::json::object();
+				WriteAudioEffectDef(laserJSON, "def", d.audioEffect.laser.def);
+				WriteAudioEffectParamChange(laserJSON, "param_change", d.audioEffect.laser.paramChange);
+				{
+					nlohmann::json pulseEvent = nlohmann::json::object();
+					for (const auto& [audioEffectName, pulseSet] : d.audioEffect.laser.pulseEvent)
+					{
+						if (pulseSet.empty())
+						{
+							continue;
+						}
+
+						nlohmann::json pulseSetJSON = nlohmann::json::array();
+						for (const Pulse& pulse : pulseSet)
+						{
+							pulseSetJSON.push_back(pulse);
+						}
+						pulseEvent.emplace(audioEffectName, std::move(pulseSetJSON));
+					}
+					Write(laserJSON, "pulse_event", std::move(pulseEvent));
+				}
+				Write(laserJSON, "peaking_filter_delay", d.audioEffect.laser.peakingFilterDelay, 0);
+				{
+					nlohmann::json legacyJSON = nlohmann::json::object();
+					WriteByPulse(legacyJSON, "filter_gain", d.audioEffect.laser.legacy.filterGain, 0.5);
+					Write(laserJSON, "legacy", std::move(legacyJSON));
+				}
+				Write(audioEffectJSON, "laser", std::move(laserJSON));
+			}
+			Write(j, "audio_effect", std::move(audioEffectJSON));
+		}
+
+		return j;
+	}
+
+	const char* AutoTiltTypeToString(AutoTiltType type)
+	{
+		switch (type)
+		{
+		case AutoTiltType::kNormal: return "normal";
+		case AutoTiltType::kBigger: return "bigger";
+		case AutoTiltType::kBiggest: return "biggest";
+		case AutoTiltType::kKeepNormal: return "keep_normal";
+		case AutoTiltType::kKeepBigger: return "keep_bigger";
+		case AutoTiltType::kKeepBiggest: return "keep_biggest";
+		case AutoTiltType::kZero: return "zero";
+		default: return "normal";
+		}
+	}
+
+	void WriteTiltValue(nlohmann::json& arrayJSON, Pulse pulse, const TiltValue& tiltValue)
+	{
+		nlohmann::json entry = nlohmann::json::array();
+		entry.push_back(pulse);
+
+		if (std::holds_alternative<AutoTiltType>(tiltValue))
+		{
+			// Auto tilt type: [pulse, "string"]
+			entry.push_back(AutoTiltTypeToString(std::get<AutoTiltType>(tiltValue)));
+		}
+		else if (std::holds_alternative<TiltGraphPoint>(tiltValue))
+		{
+			const TiltGraphPoint& point = std::get<TiltGraphPoint>(tiltValue);
+			const bool hasCurve = !point.curve.isLinear();
+
+			// Check if vf is different from v
+			bool hasGraphValue = false;
+			if (std::holds_alternative<double>(point.v.vf))
+			{
+				hasGraphValue = !AlmostEquals(point.v.v, std::get<double>(point.v.vf));
+			}
+			else if (std::holds_alternative<AutoTiltType>(point.v.vf))
+			{
+				// vf is AutoTiltType, so there is a graph value transition
+				hasGraphValue = true;
+			}
+
+			if (hasCurve && hasGraphValue)
+			{
+				// Ignore curve when vf is AutoTiltType
+				if (std::holds_alternative<AutoTiltType>(point.v.vf))
+				{
+					nlohmann::json graphValue = nlohmann::json::array();
+					graphValue.push_back(RemoveFloatingPointError(point.v.v));
+					graphValue.push_back(AutoTiltTypeToString(std::get<AutoTiltType>(point.v.vf)));
+					entry.push_back(std::move(graphValue));
+				}
+				else
+				{
+					nlohmann::json graphValue = nlohmann::json::array();
+					graphValue.push_back(RemoveFloatingPointError(point.v.v));
+					graphValue.push_back(RemoveFloatingPointError(std::get<double>(point.v.vf)));
+					nlohmann::json curveValue = nlohmann::json::array({
+						RemoveFloatingPointError(point.curve.a),
+						RemoveFloatingPointError(point.curve.b)
+					});
+					entry.push_back(nlohmann::json::array({ std::move(graphValue), std::move(curveValue) }));
+				}
+			}
+			else if (hasCurve)
+			{
+				// With curve only: [pulse, [v, [a, b]]]
+				nlohmann::json curveValue = nlohmann::json::array({
+					RemoveFloatingPointError(point.curve.a),
+					RemoveFloatingPointError(point.curve.b)
+				});
+				entry.push_back(nlohmann::json::array({
+					RemoveFloatingPointError(point.v.v),
+					curveValue
+				}));
+			}
+			else if (hasGraphValue)
+			{
+				// GraphValue without curve: [pulse, [v, vf]]
+				nlohmann::json graphValue = nlohmann::json::array();
+				graphValue.push_back(RemoveFloatingPointError(point.v.v));
+				if (std::holds_alternative<double>(point.v.vf))
+				{
+					graphValue.push_back(RemoveFloatingPointError(std::get<double>(point.v.vf)));
+				}
+				else
+				{
+					graphValue.push_back(AutoTiltTypeToString(std::get<AutoTiltType>(point.v.vf)));
+				}
+				entry.push_back(graphValue);
+			}
+			else
+			{
+				// Simple value: [pulse, double]
+				entry.push_back(RemoveFloatingPointError(point.v.v));
+			}
+		}
+
+		arrayJSON.push_back(entry);
+	}
+
+	bool IsTiltDefaultOnly(const ByPulse<TiltValue>& tilt)
+	{
+		if (tilt.empty())
+		{
+			// Although empty array is not the spec default (which is [[0, "normal"]]), treat it as default for canonicalization
+			return true;
+		}
+		return tilt.size() == 1 &&
+			tilt.contains(0) &&
+			std::holds_alternative<AutoTiltType>(tilt.at(0)) &&
+			std::get<AutoTiltType>(tilt.at(0)) == AutoTiltType::kNormal;
+	}
+
+	nlohmann::json ToJSON(const CameraInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		if (!IsTiltDefaultOnly(d.tilt))
+		{
+			nlohmann::json tiltJSON = nlohmann::json::array();
+			for (const auto& [pulse, tiltValue] : d.tilt)
+			{
+				WriteTiltValue(tiltJSON, pulse, tiltValue);
+			}
+			Write(j, "tilt", std::move(tiltJSON));
+		}
+		{
+			nlohmann::json camJSON = nlohmann::json::object();
+			{
+				nlohmann::json bodyJSON = nlohmann::json::object();
+				WriteGraph(bodyJSON, "zoom_bottom", d.cam.body.zoomBottom, 0.0);
+				WriteGraph(bodyJSON, "zoom_side", d.cam.body.zoomSide, 0.0);
+				WriteGraph(bodyJSON, "zoom_top", d.cam.body.zoomTop, 0.0);
+				WriteGraph(bodyJSON, "rotation_deg", d.cam.body.rotationDeg, 0.0);
+				WriteGraph(bodyJSON, "center_split", d.cam.body.centerSplit, 0.0);
+				Write(camJSON, "body", bodyJSON);
+			}
+			{
+				nlohmann::json patternJSON = nlohmann::json::object();
+				{
+					nlohmann::json laserJSON = nlohmann::json::object();
+					{
+						nlohmann::json slamEventJSON = nlohmann::json::object();
+						WriteCamPatternInvokeSpinByPulse(slamEventJSON, "spin", d.cam.pattern.laser.slamEvent.spin);
+						WriteCamPatternInvokeSpinByPulse(slamEventJSON, "half_spin", d.cam.pattern.laser.slamEvent.halfSpin);
+						WriteCamPatternInvokeSwingByPulse(slamEventJSON, "swing", d.cam.pattern.laser.slamEvent.swing);
+						Write(laserJSON, "slam_event", std::move(slamEventJSON));
+					}
+					Write(patternJSON, "laser", std::move(laserJSON));
+				}
+				Write(camJSON, "pattern", std::move(patternJSON));
+			}
+			Write(j, "cam", std::move(camJSON));
+		}
+		return j;
+	}
+
+	nlohmann::json ToJSON(const BGInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		{
+			Write(j, "filename", d.filename, "");
+			nlohmann::json legacyJSON = nlohmann::json::object();
+			{
+				nlohmann::json bgJSON = nlohmann::json::array();
+				if (!d.legacy.bg[0].filename.empty())
+				{
+					bgJSON.push_back({
+						{ "filename", d.legacy.bg[0].filename },
+					});
+				}
+				if (!d.legacy.bg[1].filename.empty() && d.legacy.bg[0].filename != d.legacy.bg[1].filename)
+				{
+					bgJSON.push_back({
+						{ "filename", d.legacy.bg[1].filename },
+					});
+				}
+				Write(legacyJSON, "bg", std::move(bgJSON));
+			}
+			{
+				nlohmann::json layerJSON = nlohmann::json::object();
+				Write(layerJSON, "filename", d.legacy.layer.filename, "");
+				Write(layerJSON, "duration", d.legacy.layer.duration, 0);
+				{
+					nlohmann::json rotationJSON = nlohmann::json::object();
+					Write(rotationJSON, "tilt", d.legacy.layer.rotation.tilt, true);
+					Write(rotationJSON, "spin", d.legacy.layer.rotation.spin, true);
+					Write(layerJSON, "rotation", std::move(rotationJSON));
+				}
+				Write(legacyJSON, "layer", std::move(layerJSON));
+			}
+			{
+				nlohmann::json movieJSON = nlohmann::json::object();
+				Write(movieJSON, "filename", d.legacy.movie.filename, "");
+				Write(movieJSON, "offset", d.legacy.movie.offset, 0);
+				Write(legacyJSON, "movie", std::move(movieJSON));
+			}
+			Write(j, "legacy", std::move(legacyJSON));
+		}
+		return j;
+	}
+
+	nlohmann::json ToJSON(const EditorInfo& d)
+	{
+
+		nlohmann::json j = nlohmann::json::object();
+		Write(j, "app_name", d.appName, "");
+		Write(j, "app_version", d.appVersion, "");
+		WriteByPulseMulti(j, "comment", d.comment);
+		return j;
+	}
+
+	nlohmann::json ToJSON(const CompatInfo& d)
+	{
+		nlohmann::json j = nlohmann::json::object();
+		Write(j, "ksh_version", d.kshVersion, "");
+		{
+			nlohmann::json kshUnknownJSON = nlohmann::json::object();
+			Write(kshUnknownJSON, "meta", d.kshUnknown.meta);
+			{
+				nlohmann::json optionJSON = nlohmann::json::object();
+				for (const auto& [key, value] : d.kshUnknown.option)
+				{
+					WriteByPulseMulti(optionJSON, key.c_str(), value);
+				}
+				Write(kshUnknownJSON, "option", std::move(optionJSON));
+			}
+			WriteByPulseMulti(kshUnknownJSON, "line", d.kshUnknown.line);
+			Write(j, "ksh_unknown", std::move(kshUnknownJSON));
+		}
+		return j;
+	}
+
+	// ==================== Reading/Loading Implementation ====================
+
+	template<typename T>
+	T GetWithDefault(const nlohmann::json& j, const std::string& key, const T& defaultValue)
+	{
+		if (j.contains(key) && !j[key].is_null())
+		{
+			return j[key].get<T>();
+		}
+		return defaultValue;
+	}
+
+	template<typename T>
+	std::optional<T> GetOptional(const nlohmann::json& j, const std::string& key)
+	{
+		if (j.contains(key) && !j[key].is_null())
+		{
+			return j[key].get<T>();
+		}
+		return std::nullopt;
+	}
+
+	// Read a non-negative pulse value (floating-point values are truncated; non-numeric values throw)
+	std::optional<Pulse> ReadPulse(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		if (!j.is_number())
+		{
+			return j.get<Pulse>();
+		}
+
+		if (j.is_number_float())
+		{
+			// Range check to avoid undefined behavior in the conversion
+			const double value = j.get<double>();
+			if (0.0 <= value && value < 9223372036854775808.0)
+			{
+				return static_cast<Pulse>(value);
+			}
+		}
+		else if (j.is_number_unsigned())
+		{
+			const std::uint64_t value = j.get<std::uint64_t>();
+			if (value <= static_cast<std::uint64_t>(std::numeric_limits<Pulse>::max()))
+			{
+				return static_cast<Pulse>(value);
+			}
+		}
+		else
+		{
+			const std::int64_t value = j.get<std::int64_t>();
+			if (value >= 0)
+			{
+				return value;
+			}
+		}
+
+		pDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::InvalidByPulseEntryFormat,
+			.scope = WarningScope::EditorOnly,
+			.message = "Invalid pulse value " + j.dump() + " is ignored (must be a non-negative value)",
+		});
+		return std::nullopt;
+	}
+
+	// Read a non-negative relative pulse value whose sum with basePulse (non-negative) does not overflow
+	std::optional<RelPulse> ReadRelPulse(const nlohmann::json& j, Pulse basePulse, KsonLoadingDiag* pDiag)
+	{
+		const std::optional<RelPulse> value = ReadPulse(j, pDiag);
+		if (value.has_value() && *value > std::numeric_limits<Pulse>::max() - basePulse)
+		{
+			pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidByPulseEntryFormat,
+				.scope = WarningScope::EditorOnly,
+				.message = "Invalid relative pulse value " + j.dump() + " at pulse " + std::to_string(basePulse) + " is ignored (the end pulse overflows)",
+			});
+			return std::nullopt;
+		}
+		return value;
+	}
+
+	GraphValue ParseGraphValue(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		if (j.is_number())
+		{
+			return GraphValue{ j.get<double>() };
+		}
+		else if (j.is_array() && j.size() >= 2)
+		{
+			return GraphValue{ j[0].get<double>(), j[1].get<double>() };
+		}
+		else
+		{
+			pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidGraphValueFormat,
+				.scope = WarningScope::EditorOnly,
+				.message = "Invalid graph value format",
+			});
+			return GraphValue{ 0.0 };
+		}
+	}
+
+	// Parse GraphPoint from an array item where item[valueIdx] is the value and item[curveIdx] is the curve
+	GraphPoint ParseGraphPointFromArrayItem(
+		const nlohmann::json& item,
+		std::size_t valueIdx,
+		std::size_t curveIdx,
+		KsonLoadingDiag* pDiag)
+	{
+		// Parse v (GraphValue)
+		GraphValue v{ 0.0 };
+		if (item.size() > valueIdx)
+		{
+			v = ParseGraphValue(item[valueIdx], pDiag);
+		}
+
+		// Parse curve (GraphCurveValue) if present
+		GraphCurveValue curve{ 0.0, 0.0 };
+		if (item.size() > curveIdx && item[curveIdx].is_array() && item[curveIdx].size() >= 2)
+		{
+			curve = GraphCurveValue{ item[curveIdx][0].get<double>(), item[curveIdx][1].get<double>() };
+		}
+
+		return GraphPoint{ v, curve };
+	}
+
+	template<typename T>
+	ByPulse<T> ParseByPulse(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		ByPulse<T> result;
+		if (!j.is_array())
+		{
+			return result;
+		}
+
+		for (const auto& item : j)
+		{
+			if (item.is_array() && item.size() >= 2)
+			{
+				const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+				if (!pulseOpt.has_value())
+				{
+					continue;
+				}
+				Pulse pulse = *pulseOpt;
+				T value;
+				if constexpr (std::is_same_v<T, RelPulse>)
+				{
+					// Relative pulse value (stop length)
+					if (item[1].is_number() && item[1].get<double>() < 0.0)
+					{
+						// Negative values are left to the caller's stop length check
+						value = item[1].is_number_integer()
+							? item[1].get<std::int64_t>()
+							: static_cast<RelPulse>(std::max(item[1].get<double>(), -9223372036854775808.0));
+					}
+					else
+					{
+						const std::optional<RelPulse> relPulse = ReadRelPulse(item[1], pulse, pDiag);
+						if (!relPulse.has_value())
+						{
+							continue;
+						}
+						value = *relPulse;
+					}
+				}
+				else
+				{
+					value = item[1].get<T>();
+				}
+				result[pulse] = value;
+			}
+			else
+			{
+				pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidByPulseEntryFormat,
+				.scope = WarningScope::EditorOnly,
+				.message = "Invalid ByPulse entry format",
+			});
+			}
+		}
+		return result;
+	}
+
+	template<typename T>
+	ByPulseMulti<T> ParseByPulseMulti(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		ByPulseMulti<T> result;
+		if (!j.is_array())
+		{
+			return result;
+		}
+
+		for (const auto& item : j)
+		{
+			if (item.is_array() && item.size() >= 2)
+			{
+				const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+				if (!pulseOpt.has_value())
+				{
+					continue;
+				}
+				Pulse pulse = *pulseOpt;
+				T value = item[1].get<T>();
+				result.emplace(pulse, value);
+			}
+			else
+			{
+				pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidByPulseEntryFormat,
+				.scope = WarningScope::EditorOnly,
+				.message = "Invalid ByPulse entry format",
+			});
+			}
+		}
+		return result;
+	}
+
+	Graph ParseGraph(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		Graph result;
+		if (!j.is_array())
+		{
+			return result;
+		}
+
+		for (const auto& item : j)
+		{
+			if (item.is_array() && item.size() >= 2)
+			{
+				const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+				if (!pulseOpt.has_value())
+				{
+					continue;
+				}
+				Pulse pulse = *pulseOpt;
+				GraphPoint point = ParseGraphPointFromArrayItem(item, 1, 2, pDiag);
+				result[pulse] = point;
+			}
+			else
+			{
+				pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidGraphEntryFormat,
+				.scope = WarningScope::EditorOnly,
+				.message = "Invalid graph entry format",
+			});
+			}
+		}
+		return result;
+	}
+
+	template<typename T>
+	ByMeasureIdx<T> ParseByMeasureIdx(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		ByMeasureIdx<T> result;
+		if (!j.is_array())
+		{
+			return result;
+		}
+
+		for (const auto& item : j)
+		{
+			if (item.is_array() && item.size() >= 2)
+			{
+				std::int64_t idx = item[0].get<std::int64_t>();
+				T value = item[1].get<T>();
+				result[idx] = value;
+			}
+			else
+			{
+				pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidByMeasureIdxEntryFormat,
+				.scope = WarningScope::EditorOnly,
+				.message = "Invalid ByMeasureIdx entry format",
+			});
+			}
+		}
+		return result;
+	}
+
+	MetaInfo ParseMetaInfo(const nlohmann::json& j, KsonLoadingDiag*)
+	{
+		MetaInfo meta;
+		
+		meta.title = GetWithDefault<std::string>(j, "title", "");
+		meta.titleTranslit = GetWithDefault<std::string>(j, "title_translit", "");
+		meta.titleImgFilename = GetWithDefault<std::string>(j, "title_img_filename", "");
+		meta.artist = GetWithDefault<std::string>(j, "artist", "");
+		meta.artistTranslit = GetWithDefault<std::string>(j, "artist_translit", "");
+		meta.artistImgFilename = GetWithDefault<std::string>(j, "artist_img_filename", "");
+		meta.chartAuthor = GetWithDefault<std::string>(j, "chart_author", "");
+		if (j.contains("difficulty"))
+		{
+			const auto& diff = j["difficulty"];
+			if (diff.is_number_integer())
+			{
+				meta.difficulty.idx = diff.get<std::int32_t>();
+			}
+			else if (diff.is_string())
+			{
+				meta.difficulty.idx = 3; // String difficulty is always recognized as infinity
+				meta.difficulty.name = diff.get<std::string>();
+			}
+		}
+		meta.level = GetWithDefault<std::int32_t>(j, "level", 1);
+		meta.dispBPM = GetWithDefault<std::string>(j, "disp_bpm", "");
+		auto stdBPM = GetOptional<double>(j, "std_bpm");
+		if (stdBPM.has_value())
+		{
+			meta.stdBPM = stdBPM.value();
+		}
+		meta.jacketFilename = GetWithDefault<std::string>(j, "jacket_filename", "");
+		meta.jacketAuthor = GetWithDefault<std::string>(j, "jacket_author", "");
+		meta.iconFilename = GetWithDefault<std::string>(j, "icon_filename", "");
+		meta.information = GetWithDefault<std::string>(j, "information", "");
+
+		return meta;
+	}
+
+	ByPulse<double> ParseBPM(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		ByPulse<double> bpm = ParseByPulse<double>(j, pDiag);
+		for (auto itr = bpm.begin(); itr != bpm.end();)
+		{
+			auto& [pulse, value] = *itr;
+
+			if (!std::isfinite(value) || value <= 0.0)
+			{
+				pDiag->warnings.push_back({
+					.type = KsonLoadingWarningType::InvalidByPulseEntryFormat,
+					.scope = WarningScope::PlayerAndEditor,
+					.message = "Invalid BPM value " + std::to_string(value) + " at pulse " + std::to_string(pulse) + " is ignored",
+				});
+				itr = bpm.erase(itr);
+				continue;
+			}
+
+			value = std::min(value, kBPMMax);
+			++itr;
+		}
+		return bpm;
+	}
+
+	BeatInfo ParseBeatInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		BeatInfo beat;
+		
+		if (j.contains("bpm"))
+		{
+			beat.bpm = ParseBPM(j["bpm"], pDiag);
+		}
+		
+		if (j.contains("time_sig"))
+		{
+			const auto& timeSigArray = j["time_sig"];
+			if (timeSigArray.is_array())
+			{
+				for (const auto& item : timeSigArray)
+				{
+					if (item.is_array() && item.size() >= 2)
+					{
+						const std::int64_t idx = item[0].get<std::int64_t>();
+						if (idx < 0)
+						{
+							pDiag->warnings.push_back({
+								.type = KsonLoadingWarningType::InvalidByMeasureIdxEntryFormat,
+								.scope = WarningScope::EditorOnly,
+								.message = "Time signature with negative measure index " + std::to_string(idx) + " is ignored",
+							});
+							continue;
+						}
+						const auto& tsData = item[1];
+						if (tsData.is_array() && tsData.size() >= 2)
+						{
+							const TimeSig timeSig{ tsData[0].get<std::int32_t>(), tsData[1].get<std::int32_t>() };
+							if (IsValidTimeSig(timeSig))
+							{
+								beat.timeSig[idx] = timeSig;
+							}
+							else
+							{
+								pDiag->warnings.push_back({
+									.type = KsonLoadingWarningType::InvalidByMeasureIdxEntryFormat,
+									.scope = WarningScope::PlayerAndEditor,
+									.message = "Invalid time signature " + std::to_string(timeSig.n) + "/" + std::to_string(timeSig.d) + " at measure index " + std::to_string(idx) + " is ignored",
+								});
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		if (j.contains("v")) 
+		{
+			// resolution field handled separately
+		}
+		
+		// Parse scroll_speed
+		if (j.contains("scroll_speed"))
+		{
+			beat.scrollSpeed = ParseGraph(j["scroll_speed"], pDiag);
+		}
+		else
+		{
+			// Apply default value [[0, 1.0]]
+			beat.scrollSpeed[0] = GraphValue{1.0, 1.0};
+		}
+
+		// Parse stop
+		if (j.contains("stop"))
+		{
+			beat.stop = ParseByPulse<RelPulse>(j["stop"], pDiag);
+
+			// Stop length must be positive
+			for (auto itr = beat.stop.begin(); itr != beat.stop.end();)
+			{
+				if (itr->second <= 0)
+				{
+					pDiag->warnings.push_back({
+						.type = KsonLoadingWarningType::InvalidByPulseEntryFormat,
+						.scope = WarningScope::PlayerAndEditor,
+						.message = "Stop with non-positive length " + std::to_string(itr->second) + " at pulse " + std::to_string(itr->first) + " is ignored",
+					});
+					itr = beat.stop.erase(itr);
+				}
+				else
+				{
+					++itr;
+				}
+			}
+		}
+
+		return beat;
+	}
+
+	GaugeInfo ParseGaugeInfo(const nlohmann::json& j, KsonLoadingDiag*)
+	{
+		GaugeInfo gauge;
+		
+		gauge.total = GetWithDefault<std::uint32_t>(j, "total", 0);
+		
+		return gauge;
+	}
+
+	void ParseLaneNotes(const nlohmann::json& j, ByPulse<Interval>& lane, KsonLoadingDiag* pDiag)
+	{
+		if (!j.is_array())
+		{
+			return;
+		}
+
+		for (const auto& item : j)
+		{
+			if (item.is_array() && item.size() >= 2)
+			{
+				const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+				if (!pulseOpt.has_value())
+				{
+					continue;
+				}
+				Pulse pulse = *pulseOpt;
+				const std::optional<RelPulse> length = ReadRelPulse(item[1], pulse, pDiag);
+				if (!length.has_value())
+				{
+					continue;
+				}
+				Interval interval;
+				interval.length = *length;
+				lane[pulse] = interval;
+			}
+			else if (item.is_number_integer())
+			{
+				// Compact format: pulse only (chip note with length=0)
+				const std::optional<Pulse> pulseOpt = ReadPulse(item, pDiag);
+				if (!pulseOpt.has_value())
+				{
+					continue;
+				}
+				Pulse pulse = *pulseOpt;
+				lane[pulse] = Interval{ 0 };
+			}
+			else
+			{
+				pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidNoteEntryFormat,
+				.scope = WarningScope::PlayerAndEditor,
+				.message = "Invalid note entry format",
+			});
+			}
+		}
+	}
+
+	void ParseLaserSection(const nlohmann::json& j, ByPulse<LaserSection>& lane, KsonLoadingDiag* pDiag)
+	{
+		if (!j.is_array())
+		{
+			return;
+		}
+
+		for (const auto& item : j)
+		{
+			if (item.is_array() && item.size() >= 2)
+			{
+				const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+				if (!pulseOpt.has_value())
+				{
+					continue;
+				}
+				Pulse pulse = *pulseOpt;
+				LaserSection section;
+
+				// Parse laser points
+				const auto& points = item[1];
+				if (points.is_array())
+				{
+					for (const auto& point : points)
+					{
+						if (point.is_array() && point.size() >= 2)
+						{
+							const std::optional<RelPulse> ryOpt = ReadRelPulse(point[0], pulse, pDiag);
+							if (!ryOpt.has_value())
+							{
+								continue;
+							}
+							RelPulse ry = *ryOpt;
+							GraphPoint graphPoint = ParseGraphPointFromArrayItem(point, 1, 2, pDiag);
+							section.v[ry] = graphPoint;
+						}
+					}
+				}
+
+				// Parse width (optional, defaults to 1)
+				if (item.size() >= 3)
+				{
+					section.w = item[2].get<std::int32_t>();
+				}
+				else
+				{
+					section.w = kLaserXScale1x;
+				}
+
+				// Laser section must have at least one point
+				if (section.v.empty())
+				{
+					pDiag->warnings.push_back({
+						.type = KsonLoadingWarningType::InvalidLaserSectionFormat,
+						.scope = WarningScope::PlayerAndEditor,
+						.message = "Laser section without points is ignored",
+					});
+					continue;
+				}
+
+				lane[pulse] = section;
+			}
+			else
+			{
+				pDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidLaserSectionFormat,
+				.scope = WarningScope::PlayerAndEditor,
+				.message = "Invalid laser section format",
+			});
+			}
+		}
+	}
+
+	NoteInfo ParseNoteInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		NoteInfo note;
+
+		// Parse BT lanes
+		if (j.contains("bt"))
+		{
+			const auto& btArray = j["bt"];
+			if (btArray.is_array())
+			{
+				for (std::size_t i = 0; i < btArray.size() && i < note.bt.size(); ++i)
+				{
+					ParseLaneNotes(btArray[i], note.bt[i], pDiag);
+				}
+			}
+		}
+
+		// Parse FX lanes
+		if (j.contains("fx"))
+		{
+			const auto& fxArray = j["fx"];
+			if (fxArray.is_array())
+			{
+				for (std::size_t i = 0; i < fxArray.size() && i < note.fx.size(); ++i)
+				{
+					ParseLaneNotes(fxArray[i], note.fx[i], pDiag);
+				}
+			}
+		}
+
+		// Parse laser lanes
+		if (j.contains("laser"))
+		{
+			const auto& laserArray = j["laser"];
+			if (laserArray.is_array())
+			{
+				for (std::size_t i = 0; i < laserArray.size() && i < note.laser.size(); ++i)
+				{
+					ParseLaserSection(laserArray[i], note.laser[i], pDiag);
+				}
+			}
+		}
+
+		return note;
+	}
+
+	BGMPreviewInfo ParseBGMPreviewInfo(const nlohmann::json& j, KsonLoadingDiag*)
+	{
+		BGMPreviewInfo preview;
+		preview.offset = GetWithDefault<std::int32_t>(j, "offset", 0);
+		preview.duration = GetWithDefault<std::int32_t>(j, "duration", 15000);
+		return preview;
+	}
+
+	LegacyBGMInfo ParseLegacyBGMInfo(const nlohmann::json& j, KsonLoadingDiag*)
+	{
+		LegacyBGMInfo legacy;
+		if (j.contains("fp_filenames") && j["fp_filenames"].is_array())
+		{
+			const auto& fpArray = j["fp_filenames"];
+			if (fpArray.size() >= 1) legacy.filenameF = fpArray[0].get<std::string>();
+			if (fpArray.size() >= 2) legacy.filenameP = fpArray[1].get<std::string>();
+			if (fpArray.size() >= 3) legacy.filenameFP = fpArray[2].get<std::string>();
+		}
+		return legacy;
+	}
+
+	BGMInfo ParseBGMInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		BGMInfo bgm;
+		bgm.filename = GetWithDefault<std::string>(j, "filename", "");
+		bgm.vol = GetWithDefault<double>(j, "vol", 1.0);
+		bgm.offset = GetWithDefault<std::int32_t>(j, "offset", 0);
+		
+		if (j.contains("preview"))
+		{
+			bgm.preview = ParseBGMPreviewInfo(j["preview"], pDiag);
+		}
+		
+		if (j.contains("legacy"))
+		{
+			bgm.legacy = ParseLegacyBGMInfo(j["legacy"], pDiag);
+		}
+		
+		return bgm;
+	}
+
+	AudioEffectType ParseAudioEffectType(const std::string& typeStr)
+	{
+		static const std::unordered_map<std::string, AudioEffectType> typeMap = {
+			{"retrigger", AudioEffectType::Retrigger},
+			{"gate", AudioEffectType::Gate},
+			{"flanger", AudioEffectType::Flanger},
+			{"pitch_shift", AudioEffectType::PitchShift},
+			{"bitcrusher", AudioEffectType::Bitcrusher},
+			{"phaser", AudioEffectType::Phaser},
+			{"wobble", AudioEffectType::Wobble},
+			{"tapestop", AudioEffectType::Tapestop},
+			{"echo", AudioEffectType::Echo},
+			{"sidechain", AudioEffectType::Sidechain},
+			{"switch_audio", AudioEffectType::SwitchAudio},
+			{"high_pass_filter", AudioEffectType::HighPassFilter},
+			{"low_pass_filter", AudioEffectType::LowPassFilter},
+			{"peaking_filter", AudioEffectType::PeakingFilter}
+		};
+		
+		auto it = typeMap.find(typeStr);
+		if (it != typeMap.end())
+		{
+			return it->second;
+		}
+		return AudioEffectType::Unspecified;
+	}
+
+	AudioEffectDef ParseAudioEffectDef(const nlohmann::json& j, KsonLoadingDiag*)
+	{
+		AudioEffectDef def;
+		
+		if (j.contains("type") && j["type"].is_string())
+		{
+			def.type = ParseAudioEffectType(j["type"].get<std::string>());
+		}
+		
+		if (j.contains("v") && j["v"].is_object())
+		{
+			for (const auto& [key, value] : j["v"].items())
+			{
+				if (value.is_string())
+				{
+					def.v[key] = value.get<std::string>();
+				}
+			}
+		}
+		
+		return def;
+	}
+
+	AudioEffectFXInfo ParseAudioEffectFXInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		AudioEffectFXInfo fx;
+		
+		// Parse def array
+		if (j.contains("def") && j["def"].is_array())
+		{
+			for (const auto& item : j["def"])
+			{
+				if (item.is_array() && item.size() >= 2)
+				{
+					AudioEffectDefKVP kvp;
+					kvp.name = item[0].get<std::string>();
+					kvp.v = ParseAudioEffectDef(item[1], pDiag);
+					fx.def.push_back(kvp);
+				}
+			}
+		}
+		
+		// Parse param_change
+		if (j.contains("param_change") && j["param_change"].is_object())
+		{
+			for (const auto& [effectName, params] : j["param_change"].items())
+			{
+				if (params.is_object())
+				{
+					for (const auto& [paramName, values] : params.items())
+					{
+						if (values.is_array())
+						{
+							fx.paramChange[effectName][paramName] = ParseByPulse<std::string>(values, pDiag);
+						}
+					}
+				}
+			}
+		}
+		
+		// Parse long_event
+		if (j.contains("long_event") && j["long_event"].is_object())
+		{
+			for (const auto& [effectName, lanes] : j["long_event"].items())
+			{
+				if (lanes.is_array())
+				{
+					FXLane<AudioEffectParams> fxLanes;
+					for (std::size_t i = 0; i < lanes.size() && i < fxLanes.size(); ++i)
+					{
+						if (lanes[i].is_array())
+						{
+							for (const auto& event : lanes[i])
+							{
+								if (event.is_number_unsigned())
+								{
+									const std::optional<Pulse> pulseOpt = ReadPulse(event, pDiag);
+									if (!pulseOpt.has_value())
+									{
+										continue;
+									}
+									Pulse pulse = *pulseOpt;
+									AudioEffectParams params;
+									fxLanes[i][pulse] = params;
+								}
+								else if (event.is_array() && event.size() >= 2)
+								{
+									const std::optional<Pulse> pulseOpt = ReadPulse(event[0], pDiag);
+									if (!pulseOpt.has_value())
+									{
+										continue;
+									}
+									Pulse pulse = *pulseOpt;
+									AudioEffectParams params;
+									if (event[1].is_object())
+									{
+										for (const auto& [key, value] : event[1].items())
+										{
+											if (value.is_string())
+											{
+												params[key] = value.get<std::string>();
+											}
+										}
+									}
+									fxLanes[i][pulse] = params;
+								}
+							}
+						}
+					}
+					fx.longEvent[effectName] = fxLanes;
+				}
+			}
+		}
+		
+		return fx;
+	}
+
+	AudioEffectLaserInfo ParseAudioEffectLaserInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		AudioEffectLaserInfo laser;
+		
+		// Parse def array
+		if (j.contains("def") && j["def"].is_array())
+		{
+			for (const auto& item : j["def"])
+			{
+				if (item.is_array() && item.size() >= 2)
+				{
+					AudioEffectDefKVP kvp;
+					kvp.name = item[0].get<std::string>();
+					kvp.v = ParseAudioEffectDef(item[1], pDiag);
+					laser.def.push_back(kvp);
+				}
+			}
+		}
+		
+		// Parse param_change
+		if (j.contains("param_change") && j["param_change"].is_object())
+		{
+			for (const auto& [effectName, params] : j["param_change"].items())
+			{
+				if (params.is_object())
+				{
+					for (const auto& [paramName, values] : params.items())
+					{
+						if (values.is_array())
+						{
+							laser.paramChange[effectName][paramName] = ParseByPulse<std::string>(values, pDiag);
+						}
+					}
+				}
+			}
+		}
+		
+		// Parse pulse_event
+		if (j.contains("pulse_event") && j["pulse_event"].is_object())
+		{
+			for (const auto& [effectName, pulses] : j["pulse_event"].items())
+			{
+				if (pulses.is_array())
+				{
+					std::set<Pulse> pulseSet;
+					for (const auto& pulse : pulses)
+					{
+						if (pulse.is_number_integer())
+						{
+							if (const std::optional<Pulse> pulseValue = ReadPulse(pulse, pDiag))
+							{
+								pulseSet.insert(*pulseValue);
+							}
+						}
+					}
+					laser.pulseEvent[effectName] = pulseSet;
+				}
+			}
+		}
+		
+		// Parse peaking_filter_delay
+		laser.peakingFilterDelay = GetWithDefault<std::int32_t>(j, "peaking_filter_delay", 0);
+
+		// Parse legacy
+		if (j.contains("legacy") && j["legacy"].is_object())
+		{
+			const auto& legacyObj = j["legacy"];
+			if (legacyObj.contains("filter_gain") && legacyObj["filter_gain"].is_array())
+			{
+				laser.legacy.filterGain = ParseByPulse<double>(legacyObj["filter_gain"], pDiag);
+			}
+		}
+
+		return laser;
+	}
+
+	AudioEffectInfo ParseAudioEffectInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		AudioEffectInfo audioEffect;
+		
+		if (j.contains("fx"))
+		{
+			audioEffect.fx = ParseAudioEffectFXInfo(j["fx"], pDiag);
+		}
+		
+		if (j.contains("laser"))
+		{
+			audioEffect.laser = ParseAudioEffectLaserInfo(j["laser"], pDiag);
+		}
+		
+		return audioEffect;
+	}
+
+	KeySoundFXInfo ParseKeySoundFXInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		KeySoundFXInfo fx;
+		
+		if (j.contains("chip_event") && j["chip_event"].is_object())
+		{
+			for (const auto& [soundName, lanes] : j["chip_event"].items())
+			{
+				if (lanes.is_array())
+				{
+					FXLane<KeySoundInvokeFX> fxLanes;
+					for (std::size_t i = 0; i < lanes.size() && i < fxLanes.size(); ++i)
+					{
+						if (lanes[i].is_array())
+						{
+							for (const auto& event : lanes[i])
+							{
+								if (event.is_number_unsigned())
+								{
+									const std::optional<Pulse> pulseOpt = ReadPulse(event, pDiag);
+									if (!pulseOpt.has_value())
+									{
+										continue;
+									}
+									Pulse pulse = *pulseOpt;
+									KeySoundInvokeFX invoke;
+									fxLanes[i][pulse] = invoke;
+								}
+								else if (event.is_array() && event.size() >= 2)
+								{
+									const std::optional<Pulse> pulseOpt = ReadPulse(event[0], pDiag);
+									if (!pulseOpt.has_value())
+									{
+										continue;
+									}
+									Pulse pulse = *pulseOpt;
+									KeySoundInvokeFX invoke;
+									if (event[1].is_object() && event[1].contains("vol"))
+									{
+										invoke.vol = event[1]["vol"].get<double>();
+									}
+									fxLanes[i][pulse] = invoke;
+								}
+							}
+						}
+					}
+					fx.chipEvent[soundName] = fxLanes;
+				}
+			}
+		}
+		
+		return fx;
+	}
+
+	KeySoundLaserInfo ParseKeySoundLaserInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		KeySoundLaserInfo laser;
+		
+		if (j.contains("vol"))
+		{
+			laser.vol = ParseByPulse<double>(j["vol"], pDiag);
+		}
+		
+		if (j.contains("slam_event") && j["slam_event"].is_object())
+		{
+			for (const auto& [eventName, pulses] : j["slam_event"].items())
+			{
+				if (pulses.is_array())
+				{
+					std::set<Pulse> pulseSet;
+					for (const auto& pulse : pulses)
+					{
+						if (pulse.is_number_integer())
+						{
+							if (const std::optional<Pulse> pulseValue = ReadPulse(pulse, pDiag))
+							{
+								pulseSet.insert(*pulseValue);
+							}
+						}
+					}
+					laser.slamEvent[eventName] = pulseSet;
+				}
+			}
+		}
+		
+		if (j.contains("legacy") && j["legacy"].is_object())
+		{
+			laser.legacy.volAuto = GetWithDefault<bool>(j["legacy"], "vol_auto", false);
+		}
+		
+		return laser;
+	}
+
+	KeySoundInfo ParseKeySoundInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		KeySoundInfo keySound;
+		
+		if (j.contains("fx"))
+		{
+			keySound.fx = ParseKeySoundFXInfo(j["fx"], pDiag);
+		}
+		
+		if (j.contains("laser"))
+		{
+			keySound.laser = ParseKeySoundLaserInfo(j["laser"], pDiag);
+		}
+		
+		return keySound;
+	}
+
+	AudioInfo ParseAudioInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		AudioInfo audio;
+		
+		if (j.contains("bgm"))
+		{
+			audio.bgm = ParseBGMInfo(j["bgm"], pDiag);
+		}
+		
+		if (j.contains("key_sound"))
+		{
+			audio.keySound = ParseKeySoundInfo(j["key_sound"], pDiag);
+		}
+		
+		if (j.contains("audio_effect"))
+		{
+			audio.audioEffect = ParseAudioEffectInfo(j["audio_effect"], pDiag);
+		}
+		
+		return audio;
+	}
+
+	CamGraphs ParseCamGraphs(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		CamGraphs graphs;
+
+		if (j.contains("zoom_bottom")) graphs.zoomBottom = ParseGraph(j["zoom_bottom"], pDiag);
+		if (j.contains("zoom_side")) graphs.zoomSide = ParseGraph(j["zoom_side"], pDiag);
+		if (j.contains("zoom_top")) graphs.zoomTop = ParseGraph(j["zoom_top"], pDiag);
+		if (j.contains("rotation_deg")) graphs.rotationDeg = ParseGraph(j["rotation_deg"], pDiag);
+		if (j.contains("center_split")) graphs.centerSplit = ParseGraph(j["center_split"], pDiag);
+
+		return graphs;
+	}
+
+	AutoTiltType ParseAutoTiltType(const std::string& str)
+	{
+		if (str == "bigger") return AutoTiltType::kBigger;
+		if (str == "biggest") return AutoTiltType::kBiggest;
+		if (str == "keep_normal") return AutoTiltType::kKeepNormal;
+		if (str == "keep_bigger") return AutoTiltType::kKeepBigger;
+		if (str == "keep_biggest") return AutoTiltType::kKeepBiggest;
+		if (str == "zero") return AutoTiltType::kZero;
+		return AutoTiltType::kNormal;
+	}
+
+	ByPulse<TiltValue> ParseTilt(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		ByPulse<TiltValue> tilt;
+
+		if (j.is_array())
+		{
+			for (const auto& item : j)
+			{
+				if (item.is_array() && item.size() >= 2)
+				{
+					const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+					if (!pulseOpt.has_value())
+					{
+						continue;
+					}
+					Pulse pulse = *pulseOpt;
+
+					if (item[1].is_string())
+					{
+						// Auto tilt type: [pulse, "string"]
+						tilt[pulse] = ParseAutoTiltType(item[1].get<std::string>());
+					}
+					else if (item[1].is_number())
+					{
+						// Simple value: [pulse, double]
+						tilt[pulse] = TiltGraphPoint{ TiltGraphValue{ item[1].get<double>() } };
+					}
+					else if (item[1].is_array() && item[1].size() == 2)
+					{
+						// Check if this is [v, vf], [v, [a, b]], or [[v, vf], [a, b]]
+						const bool isInvalidArraySize =
+							(item[1][0].is_array() && item[1][0].size() < 2) ||
+							(item[1][1].is_array() && item[1][1].size() < 2);
+						if (isInvalidArraySize)
+						{
+							pDiag->warnings.push_back({
+								.type = KsonLoadingWarningType::InvalidGraphValueFormat,
+								.scope = WarningScope::EditorOnly,
+								.message = "Invalid tilt value format",
+							});
+							continue;
+						}
+
+						if (item[1][0].is_array())
+						{
+							// [[v, vf], [a, b]]: TiltGraphValue with immediate change and curve
+							TiltGraphValue gv{
+								item[1][0][0].get<double>(),
+								item[1][0][1].get<double>()
+							};
+							GraphCurveValue curve{
+								item[1][1][0].get<double>(),
+								item[1][1][1].get<double>()
+							};
+							tilt[pulse] = TiltGraphPoint{ gv, curve };
+						}
+						else if (item[1][1].is_array())
+						{
+							// [v, [a, b]]: Single value with curve
+							TiltGraphValue gv{ item[1][0].get<double>() };
+							GraphCurveValue curve{
+								item[1][1][0].get<double>(),
+								item[1][1][1].get<double>()
+							};
+							tilt[pulse] = TiltGraphPoint{ gv, curve };
+						}
+						else
+						{
+							// [v, vf]: TiltGraphValue with immediate change, no curve
+							// vf can be either double or string (AutoTiltType)
+							if (item[1][1].is_string())
+							{
+								// [double, string]: manual tilt to auto tilt
+								tilt[pulse] = TiltGraphPoint{
+									TiltGraphValue{
+										item[1][0].get<double>(),
+										ParseAutoTiltType(item[1][1].get<std::string>())
+									}
+								};
+							}
+							else
+							{
+								// [double, double]: manual tilt with immediate change
+								tilt[pulse] = TiltGraphPoint{
+									TiltGraphValue{
+										item[1][0].get<double>(),
+										item[1][1].get<double>()
+									}
+								};
+							}
+						}
+					}
+				}
+			}
+		}
+
+		return tilt;
+	}
+
+	CameraInfo ParseCameraInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		CameraInfo camera;
+		
+		if (j.contains("tilt"))
+		{
+			camera.tilt = ParseTilt(j["tilt"], pDiag);
+		}
+		
+		if (j.contains("cam"))
+		{
+			const auto& camJ = j["cam"];
+			if (camJ.contains("body"))
+			{
+				camera.cam.body = ParseCamGraphs(camJ["body"], pDiag);
+			}
+			
+			if (camJ.contains("pattern") && camJ["pattern"].is_object())
+			{
+				const auto& patternJ = camJ["pattern"];
+				if (patternJ.contains("laser") && patternJ["laser"].is_object())
+				{
+					const auto& laserJ = patternJ["laser"];
+					if (laserJ.contains("slam_event") && laserJ["slam_event"].is_object())
+					{
+						const auto& slamEventJ = laserJ["slam_event"];
+						
+						if (slamEventJ.contains("spin") && slamEventJ["spin"].is_array())
+						{
+							for (const auto& item : slamEventJ["spin"])
+							{
+								if (item.is_array() && item.size() >= 3)
+								{
+									const std::optional<Pulse> yOpt = ReadPulse(item[0], pDiag);
+									if (!yOpt.has_value())
+									{
+										continue;
+									}
+									Pulse y = *yOpt;
+									const std::optional<RelPulse> length = ReadRelPulse(item[2], y, pDiag);
+									if (!length.has_value())
+									{
+										continue;
+									}
+									camera.cam.pattern.laser.slamEvent.spin[y] = CamPatternInvokeSpin
+									{
+										.d = item[1].get<std::int32_t>(),
+										.length = *length,
+									};
+								}
+							}
+						}
+						
+						if (slamEventJ.contains("half_spin") && slamEventJ["half_spin"].is_array())
+						{
+							for (const auto& item : slamEventJ["half_spin"])
+							{
+								if (item.is_array() && item.size() >= 3)
+								{
+									const std::optional<Pulse> yOpt = ReadPulse(item[0], pDiag);
+									if (!yOpt.has_value())
+									{
+										continue;
+									}
+									Pulse y = *yOpt;
+									const std::optional<RelPulse> length = ReadRelPulse(item[2], y, pDiag);
+									if (!length.has_value())
+									{
+										continue;
+									}
+									camera.cam.pattern.laser.slamEvent.halfSpin[y] = CamPatternInvokeSpin
+									{
+										.d = item[1].get<std::int32_t>(),
+										.length = *length,
+									};
+								}
+							}
+						}
+						
+						if (slamEventJ.contains("swing") && slamEventJ["swing"].is_array())
+						{
+							for (const auto& item : slamEventJ["swing"])
+							{
+								if (item.is_array() && item.size() >= 3)
+								{
+									const std::optional<Pulse> yOpt = ReadPulse(item[0], pDiag);
+									if (!yOpt.has_value())
+									{
+										continue;
+									}
+									Pulse y = *yOpt;
+									const std::optional<RelPulse> length = ReadRelPulse(item[2], y, pDiag);
+									if (!length.has_value())
+									{
+										continue;
+									}
+									CamPatternInvokeSwing swing;
+									swing.d = item[1].get<std::int32_t>();
+									swing.length = *length;
+									if (item.size() >= 4 && item[3].is_object())
+									{
+										if (item[3].contains("scale"))
+										{
+											swing.v.scale = item[3]["scale"].get<double>();
+										}
+										if (item[3].contains("repeat"))
+										{
+											swing.v.repeat = item[3]["repeat"].get<std::int32_t>();
+										}
+										if (item[3].contains("decay_order"))
+										{
+											swing.v.decayOrder = item[3]["decay_order"].get<std::int32_t>();
+										}
+									}
+									camera.cam.pattern.laser.slamEvent.swing[y] = std::move(swing);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		return camera;
+	}
+
+	LegacyBGInfo ParseLegacyBGInfo(const nlohmann::json& j, KsonLoadingDiag*)
+	{
+		LegacyBGInfo legacy;
+		
+		if (j.contains("bg") && j["bg"].is_array())
+		{
+			const auto& bgArray = j["bg"];
+			for (std::size_t i = 0; i < bgArray.size() && i < legacy.bg.size(); ++i)
+			{
+				if (bgArray[i].contains("filename"))
+				{
+					legacy.bg[i].filename = bgArray[i]["filename"].get<std::string>();
+				}
+			}
+
+			// If the array has only a single element, that bg is always used regardless of the gauge percentage
+			if (bgArray.size() == 1)
+			{
+				legacy.bg[1] = legacy.bg[0];
+			}
+		}
+		
+		if (j.contains("layer") && j["layer"].is_object())
+		{
+			const auto& layerJ = j["layer"];
+			legacy.layer.filename = GetWithDefault<std::string>(layerJ, "filename", "");
+			legacy.layer.duration = GetWithDefault<std::int32_t>(layerJ, "duration", 0);
+			
+			if (layerJ.contains("rotation") && layerJ["rotation"].is_object())
+			{
+				const auto& rotationJ = layerJ["rotation"];
+				legacy.layer.rotation.tilt = GetWithDefault<bool>(rotationJ, "tilt", true);
+				legacy.layer.rotation.spin = GetWithDefault<bool>(rotationJ, "spin", true);
+			}
+		}
+		
+		if (j.contains("movie") && j["movie"].is_object())
+		{
+			const auto& movieJ = j["movie"];
+			legacy.movie.filename = GetWithDefault<std::string>(movieJ, "filename", "");
+			legacy.movie.offset = GetWithDefault<std::int32_t>(movieJ, "offset", 0);
+		}
+		
+		return legacy;
+	}
+
+	BGInfo ParseBGInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		BGInfo bg;
+
+		bg.filename = GetWithDefault<std::string>(j, "filename", "");
+
+		if (j.contains("legacy"))
+		{
+			bg.legacy = ParseLegacyBGInfo(j["legacy"], pDiag);
+		}
+
+		return bg;
+	}
+
+	EditorInfo ParseEditorInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		EditorInfo editor;
+		
+		editor.appName = GetWithDefault<std::string>(j, "app_name", "");
+		editor.appVersion = GetWithDefault<std::string>(j, "app_version", "");
+		
+		if (j.contains("comment"))
+		{
+			editor.comment = ParseByPulseMulti<std::string>(j["comment"], pDiag);
+		}
+		
+		return editor;
+	}
+
+	CompatInfo ParseCompatInfo(const nlohmann::json& j, KsonLoadingDiag* pDiag)
+	{
+		CompatInfo compat;
+		
+		compat.kshVersion = GetWithDefault<std::string>(j, "ksh_version", "");
+		
+		if (j.contains("ksh_unknown") && j["ksh_unknown"].is_object())
+		{
+			const auto& unknownJ = j["ksh_unknown"];
+			
+			if (unknownJ.contains("meta") && unknownJ["meta"].is_object())
+			{
+				for (const auto& [key, value] : unknownJ["meta"].items())
+				{
+					if (value.is_string())
+					{
+						compat.kshUnknown.meta[key] = value.get<std::string>();
+					}
+				}
+			}
+			
+			if (unknownJ.contains("option") && unknownJ["option"].is_object())
+			{
+				for (const auto& [key, values] : unknownJ["option"].items())
+				{
+					if (values.is_array())
+					{
+						for (const auto& item : values)
+						{
+							if (item.is_array() && item.size() >= 2)
+							{
+								const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+								if (!pulseOpt.has_value())
+								{
+									continue;
+								}
+								Pulse pulse = *pulseOpt;
+								compat.kshUnknown.option[key].emplace(pulse, item[1].get<std::string>());
+							}
+						}
+					}
+				}
+			}
+			
+			if (unknownJ.contains("line") && unknownJ["line"].is_array())
+			{
+				for (const auto& item : unknownJ["line"])
+				{
+					if (item.is_array() && item.size() >= 2)
+					{
+						const std::optional<Pulse> pulseOpt = ReadPulse(item[0], pDiag);
+						if (!pulseOpt.has_value())
+						{
+							continue;
+						}
+						Pulse pulse = *pulseOpt;
+						compat.kshUnknown.line.emplace(pulse, item[1].get<std::string>());
+					}
+				}
+			}
+		}
+		
+		return compat;
+	}
+}
+
+namespace
+{
+	void ScanForOverlappingLaserSections(const kson::ChartData& chartData, kson::KsonSavingDiag* pKsonDiag)
+	{
+		for (std::size_t laneIdx = 0; laneIdx < kson::kNumLaserLanesSZ; ++laneIdx)
+		{
+			const std::string lane = laneIdx == 0 ? "LASER-L" : "LASER-R";
+			kson::Pulse activeEnd = 0;
+			bool hasActive = false;
+
+			for (const auto& [sectionStart, section] : chartData.note.laser[laneIdx])
+			{
+				if (section.v.empty())
+				{
+					continue;
+				}
+
+				const kson::Pulse sectionEnd = sectionStart + section.v.rbegin()->first;
+				if (sectionEnd <= sectionStart)
+				{
+					continue;
+				}
+
+				if (hasActive && sectionStart < activeEnd)
+				{
+					pKsonDiag->warnings.push_back({
+						.scope = kson::WarningScope::EditorOnly,
+						.message = "Overlapping laser section at pulse " + std::to_string(sectionStart) + " in " + lane + " is not allowed by the KSON format",
+						.details = kson::OverlappingLaserSectionsWarningDetails{
+							.pulse = sectionStart,
+							.laneIdx = laneIdx,
+						},
+					});
+				}
+
+				activeEnd = std::max(activeEnd, sectionEnd);
+				hasActive = true;
+			}
+		}
+	}
+
+	void ScanForKsonSavingWarnings(const kson::ChartData& chartData, kson::KsonSavingDiag* pKsonDiag)
+	{
+		if (!pKsonDiag)
+		{
+			return;
+		}
+
+		ScanForOverlappingLaserSections(chartData, pKsonDiag);
+	}
+}
+
+kson::ErrorType kson::SaveKsonChartData(std::ostream& stream, const ChartData& chartData, KsonSavingDiag* pKsonDiag)
+{
+	if (!stream.good())
+	{
+		return ErrorType::GeneralIOError;
+	}
+
+	try
+	{
+		ScanForKsonSavingWarnings(chartData, pKsonDiag);
+
+		nlohmann::json json = nlohmann::json::object();
+		Write(json, "format_version", kKsonFormatVersion);
+		Write(json, "meta", ToJSON(chartData.meta));
+		Write(json, "beat", ToJSON(chartData.beat));
+		Write(json, "gauge", ToJSON(chartData.gauge));
+		Write(json, "note", ToJSON(chartData.note));
+		Write(json, "audio", ToJSON(chartData.audio));
+		Write(json, "camera", ToJSON(chartData.camera));
+		Write(json, "bg", ToJSON(chartData.bg));
+		Write(json, "editor", ToJSON(chartData.editor));
+		Write(json, "compat", ToJSON(chartData.compat));
+		Write(json, "impl", chartData.impl);
+
+		stream << json.dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace);
+
+		return stream.good() ? ErrorType::None : ErrorType::GeneralIOError;
+	}
+	catch (const std::exception&)
+	{
+		return ErrorType::UnknownError;
+	}
+}
+
+kson::ErrorType kson::SaveKsonChartData(std::ostream& stream, const ChartData& chartData)
+{
+	return SaveKsonChartData(stream, chartData, nullptr);
+}
+
+kson::ErrorType kson::SaveKsonChartData(const std::string& filePath, const ChartData& chartData, KsonSavingDiag* pKsonDiag)
+{
+	std::ofstream ofs(U8Path(filePath));
+	if (!ofs.good())
+	{
+		return ErrorType::CouldNotOpenOutputFileStream;
+	}
+	return kson::SaveKsonChartData(ofs, chartData, pKsonDiag);
+}
+
+kson::ErrorType kson::SaveKsonChartData(const std::string& filePath, const ChartData& chartData)
+{
+	return SaveKsonChartData(filePath, chartData, nullptr);
+}
+
+std::vector<std::string> kson::KsonSavingDiag::playerWarnings() const
+{
+	std::vector<std::string> result;
+	for (const auto& w : warnings)
+	{
+		if (w.scope == WarningScope::PlayerAndEditor)
+		{
+			result.push_back(w.message);
+		}
+	}
+	return result;
+}
+
+std::vector<std::string> kson::KsonSavingDiag::editorWarnings() const
+{
+	std::vector<std::string> result;
+	result.reserve(warnings.size());
+	for (const auto& w : warnings)
+	{
+		result.push_back(w.message);
+	}
+	return result;
+}
+
+namespace
+{
+	bool ValidateAndParseKsonJson(
+		std::istream& stream,
+		nlohmann::json* pOutJson,
+		ErrorType* pOutError,
+		KsonLoadingDiag* pKsonDiag)
+	{
+		if (!stream.good())
+		{
+			*pOutError = ErrorType::GeneralIOError;
+			return false;
+		}
+
+		try
+		{
+			stream >> *pOutJson;
+		}
+		catch (const nlohmann::json::parse_error& e)
+		{
+			*pOutError = ErrorType::KsonParseError;
+			pKsonDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::JsonParseError,
+				.scope = WarningScope::PlayerAndEditor,
+				.message = "JSON parse error: " + std::string(e.what()),
+			});
+			return false;
+		}
+
+		if (!pOutJson->contains("format_version"))
+		{
+			*pOutError = ErrorType::KsonParseError;
+			pKsonDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::MissingFormatVersion,
+				.scope = WarningScope::PlayerAndEditor,
+				.message = "Missing required field: format_version",
+			});
+			return false;
+		}
+
+		if (!(*pOutJson)["format_version"].is_number_integer())
+		{
+			*pOutError = ErrorType::KsonParseError;
+			pKsonDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::InvalidFormatVersion,
+				.scope = WarningScope::PlayerAndEditor,
+				.message = "Invalid format_version field type",
+			});
+			return false;
+		}
+
+		const std::int32_t formatVersion = (*pOutJson)["format_version"].get<std::int32_t>();
+		if (formatVersion > kKsonFormatVersion)
+		{
+			std::ostringstream oss;
+			oss << "kson file uses newer format version (" << formatVersion << ") than supported (" << kKsonFormatVersion << ")";
+			pKsonDiag->warnings.push_back({
+				.type = KsonLoadingWarningType::NewerFormatVersion,
+				.scope = WarningScope::PlayerAndEditor,
+				.message = oss.str(),
+			});
+		}
+
+		return true;
+	}
+}
+
+kson::ChartData kson::LoadKsonChartData(std::istream& stream, KsonLoadingDiag* pKsonDiag)
+{
+	KsonLoadingDiag localDiag;
+	if (!pKsonDiag)
+	{
+		pKsonDiag = &localDiag;
+	}
+
+	ChartData chartData;
+
+	try
+	{
+		nlohmann::json j;
+		if (!ValidateAndParseKsonJson(stream, &j, &chartData.error, pKsonDiag))
+		{
+			return chartData;
+		}
+
+		if (j.contains("meta"))
+		{
+			chartData.meta = ParseMetaInfo(j["meta"], pKsonDiag);
+		}
+
+		if (j.contains("beat"))
+		{
+			chartData.beat = ParseBeatInfo(j["beat"], pKsonDiag);
+		}
+
+		if (j.contains("gauge"))
+		{
+			chartData.gauge = ParseGaugeInfo(j["gauge"], pKsonDiag);
+		}
+
+		if (j.contains("note"))
+		{
+			chartData.note = ParseNoteInfo(j["note"], pKsonDiag);
+		}
+
+		if (j.contains("audio"))
+		{
+			chartData.audio = ParseAudioInfo(j["audio"], pKsonDiag);
+		}
+
+		if (j.contains("camera"))
+		{
+			chartData.camera = ParseCameraInfo(j["camera"], pKsonDiag);
+		}
+
+		if (j.contains("bg"))
+		{
+			chartData.bg = ParseBGInfo(j["bg"], pKsonDiag);
+		}
+
+		if (j.contains("editor"))
+		{
+			chartData.editor = ParseEditorInfo(j["editor"], pKsonDiag);
+		}
+
+		if (j.contains("compat"))
+		{
+			chartData.compat = ParseCompatInfo(j["compat"], pKsonDiag);
+		}
+
+		if (j.contains("impl"))
+		{
+			chartData.impl = j["impl"];
+		}
+
+		chartData.error = ErrorType::None;
+	}
+	catch (const nlohmann::json::parse_error& e)
+	{
+		chartData.error = ErrorType::KsonParseError;
+		pKsonDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::JsonParseError,
+			.scope = WarningScope::PlayerAndEditor,
+			.message = "JSON parse error: " + std::string(e.what()),
+		});
+	}
+	catch (const nlohmann::json::type_error& e)
+	{
+		chartData.error = ErrorType::KsonParseError;
+		pKsonDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::JsonTypeError,
+			.scope = WarningScope::PlayerAndEditor,
+			.message = "JSON type error: " + std::string(e.what()),
+		});
+	}
+	catch (const std::exception& e)
+	{
+		chartData.error = ErrorType::UnknownError;
+		pKsonDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::UnexpectedError,
+			.scope = WarningScope::PlayerAndEditor,
+			.message = "Unexpected error: " + std::string(e.what()),
+		});
+	}
+
+	// Add default values at zero if not present
+	if (!chartData.camera.tilt.contains(0))
+	{
+		chartData.camera.tilt.emplace(0, AutoTiltType::kNormal);
+	}
+	if (!chartData.beat.timeSig.contains(0))
+	{
+		chartData.beat.timeSig.emplace(0, TimeSig{ 4, 4 });
+	}
+	if (chartData.beat.bpm.empty())
+	{
+		chartData.beat.bpm.emplace(0, 120.0);
+	}
+	else if (!chartData.beat.bpm.contains(0))
+	{
+		chartData.beat.bpm.emplace(0, chartData.beat.bpm.begin()->second);
+	}
+	if (!chartData.beat.scrollSpeed.contains(0))
+	{
+		chartData.beat.scrollSpeed.emplace(0, GraphValue{ 1.0, 1.0 });
+	}
+	if (!chartData.audio.keySound.laser.vol.contains(0))
+	{
+		chartData.audio.keySound.laser.vol.emplace(0, 0.5);
+	}
+	if (!chartData.audio.audioEffect.laser.legacy.filterGain.contains(0))
+	{
+		chartData.audio.audioEffect.laser.legacy.filterGain.emplace(0, 0.5);
+	}
+
+	return chartData;
+}
+
+std::vector<std::string> kson::KsonLoadingDiag::playerWarnings() const
+{
+	std::vector<std::string> result;
+	for (const auto& w : warnings)
+	{
+		if (w.scope == WarningScope::PlayerAndEditor)
+		{
+			result.push_back(w.message);
+		}
+	}
+	return result;
+}
+
+std::vector<std::string> kson::KsonLoadingDiag::editorWarnings() const
+{
+	std::vector<std::string> result;
+	result.reserve(warnings.size());
+	for (const auto& w : warnings)
+	{
+		result.push_back(w.message);
+	}
+	return result;
+}
+
+kson::ChartData kson::LoadKsonChartData(const std::string& filePath, KsonLoadingDiag* pKsonDiag)
+{
+	const auto fsPath = U8Path(filePath);
+	if (!std::filesystem::exists(fsPath))
+	{
+		ChartData chartData;
+		chartData.error = ErrorType::FileNotFound;
+		return chartData;
+	}
+
+	std::ifstream ifs(fsPath);
+	if (!ifs.good())
+	{
+		ChartData chartData;
+		chartData.error = ErrorType::CouldNotOpenInputFileStream;
+		return chartData;
+	}
+	return kson::LoadKsonChartData(ifs, pKsonDiag);
+}
+
+kson::MetaChartData kson::LoadKsonMetaChartData(std::istream& stream, KsonLoadingDiag* pKsonDiag)
+{
+	KsonLoadingDiag localDiag;
+	if (!pKsonDiag)
+	{
+		pKsonDiag = &localDiag;
+	}
+
+	MetaChartData metaChartData;
+
+	try
+	{
+		nlohmann::json j;
+		if (!ValidateAndParseKsonJson(stream, &j, &metaChartData.error, pKsonDiag))
+		{
+			return metaChartData;
+		}
+
+		if (j.contains("meta"))
+		{
+			metaChartData.meta = ParseMetaInfo(j["meta"], pKsonDiag);
+		}
+
+		if (j.contains("beat") && j["beat"].contains("bpm"))
+		{
+			const ByPulse<double> bpm = ParseBPM(j["beat"]["bpm"], pKsonDiag);
+			if (!bpm.empty())
+			{
+				metaChartData.firstBPM = bpm.begin()->second;
+			}
+		}
+
+		if (j.contains("audio") && j["audio"].contains("bgm"))
+		{
+			const BGMInfo bgmInfo = ParseBGMInfo(j["audio"]["bgm"], pKsonDiag);
+			metaChartData.audio.bgm.filename = bgmInfo.filename;
+			metaChartData.audio.bgm.vol = bgmInfo.vol;
+			metaChartData.audio.bgm.preview = bgmInfo.preview;
+		}
+
+		metaChartData.error = ErrorType::None;
+	}
+	catch (const nlohmann::json::parse_error& e)
+	{
+		metaChartData.error = ErrorType::KsonParseError;
+		pKsonDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::JsonParseError,
+			.scope = WarningScope::PlayerAndEditor,
+			.message = "JSON parse error: " + std::string(e.what()),
+		});
+	}
+	catch (const nlohmann::json::type_error& e)
+	{
+		metaChartData.error = ErrorType::KsonParseError;
+		pKsonDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::JsonTypeError,
+			.scope = WarningScope::PlayerAndEditor,
+			.message = "JSON type error: " + std::string(e.what()),
+		});
+	}
+	catch (const std::exception& e)
+	{
+		metaChartData.error = ErrorType::UnknownError;
+		pKsonDiag->warnings.push_back({
+			.type = KsonLoadingWarningType::UnexpectedError,
+			.scope = WarningScope::PlayerAndEditor,
+			.message = "Unexpected error: " + std::string(e.what()),
+		});
+	}
+
+	return metaChartData;
+}
+
+kson::MetaChartData kson::LoadKsonMetaChartData(const std::string& filePath, KsonLoadingDiag* pKsonDiag)
+{
+	const auto fsPath = U8Path(filePath);
+	if (!std::filesystem::exists(fsPath))
+	{
+		MetaChartData metaChartData;
+		metaChartData.error = ErrorType::FileNotFound;
+		return metaChartData;
+	}
+
+	std::ifstream ifs(fsPath);
+	if (!ifs.good())
+	{
+		MetaChartData metaChartData;
+		metaChartData.error = ErrorType::CouldNotOpenInputFileStream;
+		return metaChartData;
+	}
+	return kson::LoadKsonMetaChartData(ifs, pKsonDiag);
+}
+#endif

@@ -3,6 +3,7 @@
 */
 #pragma once
 #include "AudioBase.hpp"
+#include <vector>
 #include <Shared/Interpolation.hpp>
 
 // Biquad Filter
@@ -23,6 +24,7 @@ public:
 	void SetAllPass(float q, float freq, float sampleRate);
 	void SetPeaking(float q, float freq, float gain, float sampleRate);
 	void SetHighShelf(float q, float freq, float gain, float sampleRate);
+    void SetLowShelf(float q, float freq, float gain, float sampleRate);
 	float Update(float in);
 private:
 	// FIR Delay buffers
@@ -118,15 +120,22 @@ public:
 	// The amount of time for a single cycle in samples
 	void SetLength(double length);
 	void SetGating(float gating);
+    // Native KSON gates follow the chart clock, including while bypassed.
+    void SetMeasureTimes(const std::vector<double>& times, double audioOffset = 0) {
+        m_measureTimes = times; m_clockOffset = audioOffset;
+    }
 
 	// Low volume
-	float low = 0.1f;
+	// Dry leakage is controlled by mix; a fully wet closed gate is silent.
+	float low = 0.0f;
 
 	virtual void Process(float *out, uint32 numSamples);
 	[[nodiscard]]
 	virtual const char *GetName() const { return "GateDSP"; }
 
 private:
+	std::vector<double> m_measureTimes;
+    double m_clockOffset = 0;
 	float m_gating = 0.5f;
 	uint32 m_length = 0;
 	uint32 m_fadeIn = 0;  // Fade In mark
@@ -175,6 +184,11 @@ private:
 	Vector<float> m_sampleBuffer;
 	uint32 m_currentSample = 0;
 	bool m_bufferReserved = false;
+    uint64 m_captureFrames = 0;
+    int32 m_seenTrigger = std::numeric_limits<int32>::min();
+    double m_expectedSource = -1.0;
+    double m_resetBucket = 0;
+    bool m_hasBucket = false;
 };
 
 class WobbleDSP : public DSP
@@ -254,6 +268,7 @@ private:
 	float m_stereoWidth = 0.f;
 	float m_volume = 0.f;
 
+	BQF m_feedbackShelf[2];
 	Vector<float> m_sampleBuffer;
 	uint32 m_time = 0;
 	uint32 m_bufferLength = 0;
@@ -310,6 +325,8 @@ public:
 	PitchShiftDSP(uint32 sampleRate);
 
 	// Pitch change amount
+	int32 chunkSize = 0;
+	float overlap = 0.4f;
 	float amount = 0.0f;
 
 	~PitchShiftDSP();
@@ -319,5 +336,8 @@ public:
 	virtual const char *GetName() const { return "PitchShiftDSP"; }
 
 private:
+    Vector<float> m_grainBuffer;
+    uint32 m_grainCursor = 0;
+    double m_grainPhase = 0;
 	class PitchShiftDSP_Impl *m_impl;
 };

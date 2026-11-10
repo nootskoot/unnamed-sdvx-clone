@@ -213,6 +213,10 @@ public:
     float scrollSpeed = 0;
 
 private:
+    void UpdateSplitMeshes();
+    float m_cachedCenterSplit = 1000000.0f;
+    bool m_splitBaseVisible[2] = {true,true};
+    bool m_splitTickVisible[2] = {true,true};
 	// Laser track generators
 	class LaserTrackBuilder* m_laserTrackBuilder[2] = { 0 };
 

@@ -53,6 +53,13 @@ public:
 	// pass in the whole note duration
 	uint32 Absolute(double noteDuration);
 
+    // Keep sub-millisecond periods until the DSP converts them to sample frames.
+    // Integer milliseconds accumulate audible phase error in long-lived loops.
+    double AbsolutePrecise(double noteDuration) const
+    {
+        return type == Time ? double(duration) : double(rate) * noteDuration;
+    }
+
 	// Either a float or integer value
 	union
 	{
@@ -138,6 +145,19 @@ struct AudioEffect
 
 	// How much of the effect is mixed in with the source audio
 	EffectParam<float> mix = 0.0f;
+
+    // KSH granular pitch controls; zero chunk selects the native SoundTouch path.
+    uint16 independentFXBus = 0;
+    bool persistentFXCapture = false; // KSH named retrigger: one capture across FX holds
+    bool nativeFilter = false;
+    bool nativeLegacyGain = false;
+    EffectParam<float> filterPosition = EffectParam<float>(0,1);
+    EffectParam<float> filterFreq = 50, filterFreqMax = 7900;
+    EffectParam<float> filterGain = .5f, filterBandwidth = 1.2f;
+    EffectParam<int32> pitchChunk = 0;
+    EffectParam<float> pitchOverlap = 0.4f;
+
+
 
 	union
 	{

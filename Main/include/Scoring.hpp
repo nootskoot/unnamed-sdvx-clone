@@ -150,6 +150,12 @@ public:
 	// Check if a laser is currently held
 	[[nodiscard]]
 	bool IsLaserHeld(uint32 laserIndex, bool includeSlams = true) const;
+    bool IsLaserAudioEligible(uint32 lane) const
+    {
+        // Delay tails may continue after a section ends; a currently missed
+        // laser still suppresses that lane's sound.
+        return lane < 2 && (!m_currentLaserSegments[lane] || IsLaserHeld(lane, false));
+    }
 
 	// Checks if a laser is currently not used or needed soon
 	[[nodiscard]]

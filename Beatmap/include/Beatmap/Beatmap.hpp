@@ -2,6 +2,8 @@
 #include "BeatmapObjects.hpp"
 #include "AudioEffects.hpp"
 #include "EffectTimeline.hpp"
+#include "KSONScroll.hpp"
+#include <unordered_map>
 #include <Shared/Resource.hpp>
 
 /* Global settings stored in a beatmap */
@@ -22,6 +24,8 @@ struct BeatmapSettings
 	// Both audio tracks specified for the map / if any is set
 	String audioNoFX;
 	String audioFX;
+    String audioLaserFX, audioCombinedFX; // Optional legacy P and FP stems; populated on chart load.
+    int peakingFilterDelay = 0;
 	// Path to the jacket image
 	String jacketPath;
 	// Path to the background and foreground shader files
@@ -43,6 +47,11 @@ struct BeatmapSettings
 	MapTime previewDuration;
 
 	// Initial audio settings
+    // Runtime import metadata; deliberately not added to the legacy DB serializer.
+    int ksonCameraVersion = -1; // Runtime-only compatibility from converted KSON.
+    int kshBehaviorVersion = -1; // -1: native KSON/default behavior
+    bool kshLegacyKeep = false;
+    bool slamAutoVolume = false;
 	float slamVolume = 1.0f;
 	float laserEffectMix = 1.0f;
 	float musicVolume = 1.0f;
@@ -70,6 +79,15 @@ public:
 	using LaneTogglePointsIterator = LaneTogglePoints::const_iterator;
 
 public:
+    struct AudioEffectChange {
+        MapTime time;
+        EffectType type;
+        bool filter;
+        AudioEffect effect;
+        bool inactive = false;
+    };
+    const AudioEffect* GetInactiveFilter(EffectType type) const { return m_inactiveAudioFilters.Find(type); }
+    const Vector<AudioEffectChange>& GetAudioEffectChanges() const { return m_audioEffectChanges; }
 	bool Load(BinaryStream& input, bool metadataOnly = false);
 	bool Load(const Resource& resource, bool metadataOnly = false);
 
@@ -174,12 +192,58 @@ public:
 
 	float GetCenterSplitValueAt(MapTime mapTime) const;
 	float GetScrollSpeedAt(MapTime mapTime) const;
+	// KSON_STAGE8_EXTREME_HOLD: read-only renderer inspection of authored scroll nodes.
+	const LineGraph& GetScrollSpeedGraph() const noexcept
+	{
+		return m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED);
+	}
+	// Negative scroll speeds make future object distance non-monotonic.
+	// Used only to select the safe renderer visibility path; never clamps scroll.
+	bool HasReverseScroll() const
+	{
+		const auto& graph = m_effects.GetGraph(EffectTimeline::GraphType::SCROLL_SPEED);
+		for (const auto& point : graph)
+		{
+			if (point.second.value.first < 0.0 || point.second.value.second < 0.0)
+				return true;
+		}
+		return false;
+	}
+
+    using VisualPath = std::vector<std::pair<double,double>>; // exact ms, absolute scroll beats
+    const VisualPath& GetVisualPath(const ObjectState* obj) const
+    {
+        static const VisualPath empty;
+        const auto it = m_visualPaths.find(obj);
+        return it == m_visualPaths.end() ? empty : it->second;
+    }
+    const std::vector<double>& GetKSONBars() const { return m_ksonBars; }
+    const std::vector<double>& GetKSONBarTimes() const { return m_ksonBarTimes; }
+    const KSONScroll* GetKSONScroll() const { return m_ksonScroll.get(); }
+    std::pair<double, double> GetVisualTimes(const ObjectState* obj) const
+    {
+        const auto it = m_visualTimes.find(obj);
+        if (it != m_visualTimes.end()) return it->second;
+        double end = obj->time;
+        const MultiObjectState* state = *obj;
+        if (obj->type == ObjectType::Hold) end += state->hold.duration;
+        if (obj->type == ObjectType::Laser) end += state->laser.duration;
+        return {double(obj->time), end};
+    }
 
 private:
+    Vector<AudioEffectChange> m_audioEffectChanges;
+    std::unordered_map<const ObjectState*, VisualPath> m_visualPaths;
+    std::vector<double> m_ksonBars;
+    std::vector<double> m_ksonBarTimes;
+    std::unique_ptr<KSONScroll> m_ksonScroll;
+    std::unordered_map<const ObjectState*, std::pair<double,double>> m_visualTimes;
 	bool m_ProcessKShootMap(BinaryStream& input, bool metadataOnly);
+	bool m_ProcessKSON(const Resource& resource, bool metadataOnly);
 
 	Map<EffectType, AudioEffect> m_customAudioEffects;
 	Map<EffectType, AudioEffect> m_customAudioFilters;
+    Map<EffectType, AudioEffect> m_inactiveAudioFilters;
 
 	Objects m_objectStates;
 	TimingPoints m_timingPoints;

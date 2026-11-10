@@ -2,6 +2,32 @@
 
 #include "stdafx.h"
 #include "LineGraph.hpp"
+#include <algorithm>
+#include <cmath>
+
+// Quadratic KSON graph interpolation: one control point (a,b).
+// For graph points without an authored curve, {0,0} reduces to y=x.
+namespace {
+double KsonGraphCurveTime(double a, double x) {
+    if (x <= 0.0) return 0.0;
+    if (x >= 1.0) return 1.0;
+    const double discr = std::max(0.0, 4.0 * a * a + 4.0 * (1.0 - 2.0 * a) * x);
+    const double den = 2.0 * a + std::sqrt(discr);
+    return den > 1e-12 ? 2.0 * x / den : std::sqrt(x);
+}
+double KsonGraphCurveAreaTo(double a, double b, double x) {
+    const double t = KsonGraphCurveTime(a, x);
+    const double t2 = t * t;
+    return 2.0 * a * b * t2 +
+        (4.0 * b * (1.0 - 2.0 * a) + 2.0 * a * (1.0 - 2.0 * b)) * t2 * t / 3.0 +
+        (1.0 - 2.0 * a) * (1.0 - 2.0 * b) * t2 * t2 / 2.0;
+}
+double KsonGraphCurveValue(double a, double b, double x) {
+    const double t = KsonGraphCurveTime(a, x);
+    return 2.0 * b * t * (1.0 - t) + t * t;
+}
+} // namespace
+
 
 void LineGraph::Insert(MapTime mapTime, double point)
 {
@@ -235,22 +261,16 @@ double LineGraph::Integrate(PointsIterator curr, MapTime begin, MapTime end) con
 
     assert(end <= next->first);
 
-    // TODO: support integration of bezier curves
-    double value = Integrate(curr);
-
-    if (curr->first != begin)
-    {
-        const double x = static_cast<double>(begin - curr->first) / (next->first - curr->first);
-        value -= (begin - curr->first) * Math::Lerp(curr->second.value.second, next->second.value.first, x * 0.5);
-    }
-
-    if (end != next->first)
-    {
-        const double x = static_cast<double>(next->first - end) / (next->first - curr->first);
-        value -= (next->first - end) * Math::Lerp(curr->second.value.second, next->second.value.first, 1 - x * 0.5);
-    }
-
-    return sign * value;
+        const double span = static_cast<double>(next->first - curr->first);
+        const double x0 = (begin - curr->first) / span;
+        const double x1 = (end - curr->first) / span;
+        const double first = curr->second.value.second;
+        const double last = next->second.value.first;
+        const auto& curve = curr->second.curve;
+        // Analytic integral of y(t) * dx/dt, preserving signed scroll speed.
+        const double area = KsonGraphCurveAreaTo(curve.first, curve.second, x1) -
+                            KsonGraphCurveAreaTo(curve.first, curve.second, x0);
+        return sign * span * (first * (x1 - x0) + (last - first) * area);
 }
 
 double LineGraph::Integrate(PointsIterator curr) const
@@ -267,7 +287,11 @@ double LineGraph::Integrate(PointsIterator curr) const
         return 0.0;
     }
 
-    return static_cast<double>(next->first - curr->first) * (next->second.value.first + curr->second.value.second) * 0.5;
+        const double first = curr->second.value.second;
+        const double last = next->second.value.first;
+        const auto& curve = curr->second.curve;
+        return static_cast<double>(next->first - curr->first) *
+            (first + (last - first) * KsonGraphCurveAreaTo(curve.first, curve.second, 1.0));
 }
 
 double LineGraph::ValueAt(MapTime mapTime) const
@@ -303,5 +327,7 @@ double LineGraph::ValueAt(MapTime mapTime) const
         return secondValue;
     }
 
-    return Math::Lerp(firstValue, secondValue, (mapTime - firstTime) / static_cast<double>(secondTime - firstTime));
+        const double x = (mapTime - firstTime) / static_cast<double>(secondTime - firstTime);
+        const auto& curve = firstItr->second.curve;
+        return Math::Lerp(firstValue, secondValue, KsonGraphCurveValue(curve.first, curve.second, x));
 }

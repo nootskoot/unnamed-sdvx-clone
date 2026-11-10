@@ -6,6 +6,7 @@
 void BQF::SetLowPass(float q, float freq, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	// Sampling frequency
@@ -23,6 +24,7 @@ void BQF::SetLowPass(float q, float freq, float sampleRate)
 void BQF::SetHighPass(float q, float freq, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	assert(freq < sampleRate);
@@ -40,6 +42,7 @@ void BQF::SetHighPass(float q, float freq, float sampleRate)
 void BQF::SetAllPass(float q, float freq, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	double w0 = (2 * Math::pi * freq) / sampleRate;
@@ -56,6 +59,7 @@ void BQF::SetAllPass(float q, float freq, float sampleRate)
 void BQF::SetPeaking(float q, float freq, float gain, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	double w0 = (2 * Math::pi * freq) / sampleRate;
@@ -73,6 +77,7 @@ void BQF::SetPeaking(float q, float freq, float gain, float sampleRate)
 void BQF::SetHighShelf(float q, float freq, float gain, float sampleRate)
 {
 	// Limit q
+    freq = Math::Clamp(freq, 1.0f, sampleRate * 0.49f);
 	q = Math::Max(q, 0.01f);
 
 	double w0 = (2 * Math::pi * freq) / sampleRate;
@@ -87,6 +92,21 @@ void BQF::SetHighShelf(float q, float freq, float gain, float sampleRate)
 	a0 = (A+1) - (A-1)*cw0 + _2sqrtAalpha;
 	a1 = 2 * ((A-1) - (A+1)*cw0);
 	a2 = (A+1) - (A-1)*cw0 - _2sqrtAalpha;
+}
+// RBJ audio-EQ cookbook low shelf, using the same Q convention as SetHighShelf.
+void BQF::SetLowShelf(float q, float freq, float gain, float sampleRate)
+{
+    freq = Math::Clamp(freq, 1.f, sampleRate * .49f);
+    q = Math::Max(q, .01f);
+    const double w = 2 * Math::pi * freq / sampleRate;
+    const double c = std::cos(w), A = std::pow(10., gain / 40.);
+    const double t = std::sqrt(A) * std::sin(w) / q;
+    b0 = A * ((A+1) - (A-1)*c + t);
+    b1 = 2*A * ((A-1) - (A+1)*c);
+    b2 = A * ((A+1) - (A-1)*c - t);
+    a0 = (A+1) + (A-1)*c + t;
+    a1 = -2 * ((A-1) + (A+1)*c);
+    a2 = (A+1) + (A-1)*c - t;
 }
 float BQF::Update(float in)
 {
@@ -193,20 +213,22 @@ void LimiterDSP::Process(float *out, uint32 numSamples)
 			currentGain = (1.0f / m_currentMaxVolume) * t + (1.0f - t);
 		}
 
-		float maxVolume = Math::Max(abs(out[i * 2]), abs(out[i * 2 + 1]));
-		out[i * 2] *= currentGain * 0.9f;
-		out[i * 2 + 1] *= currentGain * 0.9f;
+		float maxVolume = Math::Max(std::abs(out[i * 2]), std::abs(out[i * 2 + 1]));
 
 		float currentMax = 1.0f / currentGain;
 		if (maxVolume > currentMax)
 		{
 			m_currentMaxVolume = maxVolume;
 			m_currentReleaseTimer = 0.0f;
+            currentGain = 1.0f / maxVolume;
 		}
 		else
 		{
 			m_currentReleaseTimer += secondsPerSample;
 		}
+        // Apply the new peak reduction to this frame, not the next one.
+        out[i * 2] *= currentGain * 0.9f;
+        out[i * 2 + 1] *= currentGain * 0.9f;
 	}
 }
 
@@ -225,14 +247,15 @@ void BitCrusherDSP::SetPeriod(float period /*= 0*/)
 }
 void BitCrusherDSP::Process(float *out, uint32 numSamples)
 {
+    if (m_period <= m_increment) { m_currentDuration=0; return; }
 	for (uint32 i = 0; i < numSamples; i++)
 	{
 		m_currentDuration += m_increment;
-		if (m_currentDuration > m_period)
+		if (m_currentDuration >= m_period)
 		{
 			m_sampleBuffer[0] = out[i * 2];
 			m_sampleBuffer[1] = out[i * 2 + 1];
-			m_currentDuration -= m_period;
+			m_currentDuration %= m_period;
 		}
 
 		out[i * 2] = m_sampleBuffer[0] * mix + out[i * 2] * (1.0f - mix);
@@ -256,41 +279,46 @@ void GateDSP::SetGating(float gating)
 	float flength = (float)m_length;
 	m_gating = gating;
 	m_halfway = (uint32)(flength * gating);
-	const float fadeDuration = Math::Min(0.05f, gating * 0.5f);
-	m_fadeIn = (uint32)((float)m_halfway * fadeDuration);
-	m_fadeOut = (uint32)((float)m_halfway * (1.0f - fadeDuration));
-	m_currentSample = 0;
+    // Keep both ramps inside their respective on/off windows. Endpoints
+    // (fully closed/open) have no ramps and must never divide by zero.
+    m_fadeIn = std::min({uint32(flength * 0.05f), m_halfway / 2,
+        (m_length - m_halfway) / 2});
+    m_fadeOut = m_halfway - m_fadeIn;
+	if (m_length) m_currentSample %= m_length;
 }
 void GateDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_length < 2)
+	if (m_length == 0)
 		return;
 
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
 
+    const bool chartClock = !m_measureTimes.empty() && m_audioBase;
+    const double sourceRate = chartClock ? m_audioBase->GetSampleRate() : m_sampleRate;
+    const double speed = chartClock ? std::max(.001f, m_audioBase->PlaybackSpeed) : 1.0;
+    const double nowMs = currentSample * 1000.0 / sourceRate - m_clockOffset;
+    auto measure = std::upper_bound(m_measureTimes.begin(), m_measureTimes.end(), nowMs);
 	for (uint32 i = 0; i < numSamples; i++)
 	{
 		if (currentSample + i < startSample)
 		{
 			continue;
 		}
-		float c = 1.0f;
-		if (m_currentSample < m_halfway)
-		{
-			// Fade out before silence
-			if (m_currentSample > m_fadeOut)
-				c = 1 - (float)(m_currentSample - m_fadeOut) / (float)m_fadeIn;
-		}
-		else
-		{
-			uint32 t = m_currentSample - m_halfway;
-			// Fade in again
-			if (t > m_fadeOut)
-				c = (float)(t - m_fadeOut) / (float)m_fadeIn;
-			else
-				c = 0.0f;
-		}
+        if (chartClock) {
+            const double time = nowMs + i * speed * 1000.0 / m_sampleRate;
+            while (measure != m_measureTimes.end() && *measure <= time) ++measure;
+            const double origin = measure == m_measureTimes.begin() ? m_measureTimes.front() : *std::prev(measure);
+            const double elapsed = std::max(0.0, (time-origin) * m_sampleRate / (1000.0*speed));
+            m_currentSample = uint32(std::fmod(elapsed, double(m_length)));
+        }
+        float c = m_currentSample < m_halfway ? 1.0f : 0.0f;
+        if (m_fadeIn != 0) {
+            if (m_currentSample < m_halfway && m_currentSample > m_fadeOut)
+                c = float(m_halfway - m_currentSample) / float(m_fadeIn);
+            else if (m_currentSample >= m_length - m_fadeIn)
+                c = float(m_currentSample - (m_length - m_fadeIn)) / float(m_fadeIn);
+        }
 
 		// Multiply volume
 		c = (c * (1 - low) + low); // Range [low, 1]
@@ -311,12 +339,15 @@ void TapeStopDSP::SetLength(double length)
 {
 	assert(m_sampleRate > 0);
 	double flength = length / 1000.0 * m_sampleRate;
-	m_length = (uint32)flength;
+	if (m_length == (uint32)flength) return;
+    m_length = (uint32)flength;
+    m_sampleIdx = 0; m_currentSample = 0;
 	m_sampleBuffer.clear();
 	m_sampleBuffer.reserve(2 * m_length + 100);
 }
 void TapeStopDSP::Process(float *out, uint32 numSamples)
 {
+    if (!m_length) return;
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
 
@@ -351,86 +382,65 @@ void TapeStopDSP::Process(float *out, uint32 numSamples)
 
 RetriggerDSP::RetriggerDSP(uint32 sampleRate) : DSP()
 {
-	SetSampleRate(sampleRate);
+    SetSampleRate(sampleRate);
+    // Bounded storage allocated outside the audio callback, matching a ten-second capture window.
+    m_sampleBuffer.resize(size_t(sampleRate) * 10 * 2);
 }
 void RetriggerDSP::SetLength(double length)
 {
-	double flength = length / 1000.0 * m_sampleRate;
-	m_length = (uint32)flength;
-	SetGating(m_gating);
-	if (!m_bufferReserved)
-	{
-		m_sampleBuffer.reserve(2 * m_length + 100);
-		m_bufferReserved = true;
-	}
+    m_length = uint32(Math::Clamp(length * m_sampleRate / 1000.0, 0.0, double(m_sampleBuffer.size()/2)));
+    SetGating(m_gating);
 }
-void RetriggerDSP::SetResetDuration(uint32 resetDuration)
+void RetriggerDSP::SetResetDuration(uint32 duration)
 {
-	float flength = (float)resetDuration / 1000.0f * (float)m_sampleRate;
-	m_resetDuration = (uint32)flength;
+    m_resetDuration = uint32(double(duration) * m_sampleRate / 1000.0);
 }
 void RetriggerDSP::SetGating(float gating)
 {
-	gating = Math::Clamp(gating, 0.f, 1.f);
-	m_gating = gating;
-	m_gateLength = (uint32)((float)m_length * gating);
+    m_gating = Math::Clamp(gating, 0.f, 1.f);
+    m_gateLength = uint32(m_length * m_gating);
 }
-void RetriggerDSP::SetMaxLength(uint32 length)
+void RetriggerDSP::SetMaxLength(uint32) {}
+void RetriggerDSP::Process(float* out, uint32 numSamples)
 {
-	float flength = (float)length / 1000.0f * (float)m_sampleRate;
-	if (!m_bufferReserved)
-	{
-		m_sampleBuffer.reserve(2 * (uint32_t)flength + 100);
-		m_bufferReserved = true;
-	}
-}
-void RetriggerDSP::Process(float *out, uint32 numSamples)
-{
-	if (m_length == 0)
-		return;
-
-	const uint32 startSample = GetStartSample();
-	const uint32 nowSample = GetCurrentSample();
-	const auto maxSample = m_audioBase->GetPCMCount();
-
-	float *pcmSource = m_audioBase->GetPCM();
-	double rateMult = (double)m_audioBase->GetSampleRate() / m_sampleRate;
-	uint32 pcmStartSample = static_cast<uint32>(lastTimingPoint * ((double)m_audioBase->GetSampleRate() / 1000.0));
-	uint32 baseStartRepeat = static_cast<uint32>(lastTimingPoint * ((double)m_audioBase->GetSampleRate() / 1000.0));
-
-	for (uint32 i = 0; i < numSamples; i++)
-	{
-		if (nowSample + i < startSample)
-		{
-			continue;
-		}
-
-		int startOffset = 0;
-		if (m_resetDuration > 0)
-		{
-			startOffset = (nowSample + i - baseStartRepeat) / (int)(m_resetDuration * rateMult);
-			startOffset = static_cast<int>(startOffset * m_resetDuration * rateMult);
-		}
-		else
-		{
-			startOffset = static_cast<int>((startSample - baseStartRepeat));
-		}
-
-		int pcmSample = static_cast<int>(pcmStartSample) + startOffset + static_cast<int>(m_currentSample * rateMult);
-		float gating = 1.0f;
-		if (m_currentSample > m_gateLength)
-			gating = 0;
-		// Sample from buffer
-		assert(static_cast<uint64>(pcmSample) < maxSample);
-		if (static_cast<uint64>(pcmSample) < maxSample) //TODO: Improve whatever is necessary to make sure this never happens
-		{
-			out[i * 2] = gating * pcmSource[pcmSample * 2] * mix + out[i * 2] * (1 - mix);
-			out[i * 2 + 1] = gating * pcmSource[pcmSample * 2 + 1] * mix + out[i * 2 + 1] * (1 - mix);
-		}
-
-		// Increase index
-		m_currentSample = (m_currentSample + 1) % m_length;
-	}
+    if (!m_audioBase || !numSamples) return;
+    const double sourceRate = m_audioBase->GetSampleRate();
+    const double step = sourceRate / m_sampleRate * std::max(.001f, m_audioBase->PlaybackSpeed);
+    double now = m_audioBase->GetSamplePos();
+    const double trigger = double(startTime) * sourceRate / 1000.0;
+    const double origin = double(lastTimingPoint) * sourceRate / 1000.0;
+    const double reset = double(m_resetDuration) * step;
+    // A discontinuous transport cannot reuse capture from before a seek/restart.
+    if (m_expectedSource < 0 || std::abs(now-m_expectedSource) > std::max(2.0, step*2)) {
+        m_captureFrames=0; m_hasBucket=false;
+    } else {
+        // Source positions are integer frames; preserve fractional resampling phase.
+        now=m_expectedSource;
+    }
+    for (uint32 i=0;i<numSamples;++i) {
+        const double position=now+i*step;
+        if(position<trigger) continue;
+        const double bucket=reset>0?std::floor((position-origin)/reset):0;
+        if(m_seenTrigger!=startTime || (reset>0 && m_hasBucket && bucket!=m_resetBucket)) {
+            m_captureFrames=0;
+            m_seenTrigger=startTime;
+        }
+        m_resetBucket=bucket; m_hasBucket=true;
+        // Capture the incoming chain signal even while the effect is mixed out.
+        if(m_captureFrames<m_sampleBuffer.size()/2) {
+            m_sampleBuffer[size_t(m_captureFrames)*2]=out[i*2];
+            m_sampleBuffer[size_t(m_captureFrames)*2+1]=out[i*2+1];
+        }
+        if(m_length) {
+            const size_t phase=size_t(m_captureFrames % m_length);
+            for(int ch=0;ch<2;++ch) {
+                const float wet=phase<m_gateLength?m_sampleBuffer[phase*2+ch]:0.f;
+                out[i*2+ch] += (wet-out[i*2+ch])*mix;
+            }
+        }
+        ++m_captureFrames;
+    }
+    m_expectedSource=now+numSamples*step;
 }
 
 WobbleDSP::WobbleDSP(uint32 sampleRate) : DSP()
@@ -457,7 +467,7 @@ void WobbleDSP::Process(float *out, uint32 numSamples)
 		{
 			continue;
 		}
-		float f = abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
+		float f = std::abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
 		f = easing.Sample(f);
 		float freq = fmin + (fmax - fmin) * f;
 
@@ -487,8 +497,12 @@ void PhaserDSP::SetStage(uint32 stage)
 }
 void PhaserDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_length == 0)
-		return;
+    if (m_length == 0) return;
+	if (m_stage == 0 || mix == 0) {
+        if (numSamples) { za[0]=out[(numSamples-1)*2]; za[1]=out[(numSamples-1)*2+1]; }
+        if (m_length) m_currentSample = (m_currentSample + numSamples) % m_length;
+        return;
+    }
 
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
@@ -506,8 +520,8 @@ void PhaserDSP::Process(float *out, uint32 numSamples)
 			continue;
 		}
 
-		float fLeft = abs(2.0f * ((float)m_currentSample / (float)m_length) - 1.0f);
-		float fRight = abs(2.0f * fmodf((float)m_currentSample / (float)m_length + stereoWidth, 1.0f) - 1.0f);
+		float fLeft = std::abs(2.0f * (((float)m_currentSample / (float)m_length)) - 1.0f);
+		float fRight = std::abs(2.0f * fmodf(((float)m_currentSample / (float)m_length) + stereoWidth, 1.0f) - 1.0f);
 		float f[2] = {fLeft, fRight};
 		for (uint32 c = 0; c < 2; c++) {
 			// logarithmic interpolation
@@ -518,19 +532,18 @@ void PhaserDSP::Process(float *out, uint32 numSamples)
 				output = m_apf[j][c].Update(output);
 			}
 			za[c] = output;
-			// effect strongest when mix = 0.5
-			output = (mix/2) * output + (1-mix/2) * out[i * 2 + c];
-			float shelved = m_hiShelf[c].Update(output);
-			out[i * 2 + c] = mix * shelved + (1-mix) * output;
+            // KSM applies the high-cut to wet audio only, then mixes at mix/2.
+            const float wet = m_hiShelf[c].Update(output);
+            out[i * 2 + c] += (wet - out[i * 2 + c]) * (mix * .5f);
 		}
-		m_currentSample++;
-		m_currentSample %= m_length;
+		if (m_length) { m_currentSample++; m_currentSample %= m_length; }
 	}
 }
 
 FlangerDSP::FlangerDSP(uint32 sampleRate) : DSP()
 {
 	SetSampleRate(sampleRate);
+    for (auto& shelf : m_feedbackShelf) shelf.SetLowShelf(.5f, 250.f, -20.f, float(sampleRate));
 }
 void FlangerDSP::SetLength(double length)
 {
@@ -548,6 +561,7 @@ void FlangerDSP::SetDelayRange(uint32 offset, uint32 depth)
 	m_max = static_cast<uint32>(max * mult);
 	m_bufferLength = (m_max + 1) * 2;
 	m_sampleBuffer.resize(m_bufferLength);
+    m_bufferOffset %= m_bufferLength;
 }
 void FlangerDSP::SetFeedback(float feedback)
 {
@@ -563,7 +577,7 @@ void FlangerDSP::SetVolume(float volume)
 }
 void FlangerDSP::Process(float *out, uint32 numSamples)
 {
-	if (m_bufferLength <= 0)
+	if (m_bufferLength <= 0 || m_length == 0)
 		return;
 	float *data = m_sampleBuffer.data();
 	if (data == nullptr)
@@ -593,25 +607,22 @@ void FlangerDSP::Process(float *out, uint32 numSamples)
 		int32 samplePosRight = ((int)m_bufferOffset - (int)dRight * 2 + 1) % (int)m_bufferLength;
 		if (samplePosRight < 0) samplePosRight = m_bufferLength + samplePosRight;
 
-		// Inject new sample
-		data[m_bufferOffset + 0] = Math::Clamp(
-			(m_feedback * data[samplePosLeft] + out[i * 2]) * (mix * m_volume + (1.f - mix)), -1.f,
-			1.f);
-		data[m_bufferOffset + 1] = Math::Clamp(
-			(m_feedback * data[samplePosRight] + out[i * 2 + 1]) * (mix * m_volume + (1.f - mix)),
-			-1.f, 1.f);
-
-		// Apply delay
-		out[i * 2] = Math::Clamp(
-			(mix * data[samplePosLeft] + out[i * 2]) * (mix * m_volume + (1.f - mix)), -1.f, 1.f);
-		out[i * 2 + 1] = Math::Clamp(
-			(mix * data[samplePosRight] + out[i * 2 + 1]) * (mix * m_volume + (1.f - mix)), -1.f,
-			1.f);
+        // Read before writing: a zero delay can address the write slot.
+        const float delayed[2] = { data[samplePosLeft], data[samplePosRight] };
+        const float gain = 1.f + mix * (m_volume - 1.f);
+        for (uint32 channel = 0; channel < 2; ++channel) {
+            const float dry = out[i * 2 + channel];
+            // KSM's feedback path removes low-frequency buildup. Do not
+            // hard-clip the effect here; output limiting belongs to the mixer.
+            data[m_bufferOffset + channel] = m_feedbackShelf[channel].Update(
+                (dry + m_feedback * delayed[channel]) * gain);
+            out[i * 2 + channel] = (dry + mix * delayed[channel]) * gain;
+        }
 
 		m_bufferOffset += 2;
 		if (m_bufferOffset >= m_bufferLength)
 			m_bufferOffset = 0;
-		m_time++;
+		if (m_length) m_time++;
 	}
 }
 
@@ -622,8 +633,11 @@ EchoDSP::EchoDSP(uint32 sampleRate) : DSP()
 void EchoDSP::SetLength(double length)
 {
 	double flength = length / 1000.0 * m_sampleRate;
-	m_sampleBuffer.clear();
-	m_bufferLength = (uint32)(flength * 2);
+	const uint32 newLength = uint32(std::max(0.0, flength)) * 2;
+    if (newLength == m_bufferLength) return;
+    m_bufferOffset = 0;
+    m_sampleBuffer.clear();
+	m_bufferLength = newLength;
 	m_sampleBuffer.resize(m_bufferLength);
 	memset(m_sampleBuffer.data(), 0, sizeof(float) * m_bufferLength);
 	m_numLoops = 0;
@@ -631,7 +645,7 @@ void EchoDSP::SetLength(double length)
 void EchoDSP::Process(float *out, uint32 numSamples)
 {
 	float *data = m_sampleBuffer.data();
-	if (!data)
+	if (!data || m_bufferLength < 2)
 		return;
 
 	const uint32 startSample = GetStartSample();
@@ -675,7 +689,7 @@ void SidechainDSP::SetLength(double length)
 {
 	double flength = length / 1000.0 * m_sampleRate;
 	m_length = (uint32)flength;
-	m_time = 0;
+    m_time = m_length ? m_time % m_length : 0;
 }
 void SidechainDSP::SetAttackTime(double length)
 {
@@ -723,7 +737,7 @@ void SidechainDSP::Process(float *out, uint32 numSamples)
 			volume = 1.0f;
 		}
 		// range from 1/ratio (volume=0) to 1 (volume=1)
-		float sampleGain = mix * ((1.0f/ratio) + (1.0f - 1.0f/ratio)*volume) + (1.0f - mix);
+		float sampleGain = mix * ((1.0f/std::max(ratio, 1.0f)) + (1.0f - 1.0f/ratio)*volume) + (1.0f - mix);
 		out[i * 2 + 0] *= sampleGain;
 		out[i * 2 + 1] *= sampleGain;
 		if (++m_time > m_length)
@@ -753,12 +767,13 @@ public:
 	{
 		m_soundtouch.setChannels(2);
 		m_soundtouch.setSampleRate(sampleRate);
+        init = true;
 		m_soundtouch.setSetting(SETTING_USE_AA_FILTER, 0);
 		m_soundtouch.setSetting(SETTING_SEQUENCE_MS, 5);
 		//m_soundtouch.setSetting(SETTING_SEEKWINDOW_MS, 10);
 		//m_soundtouch.setSetting(SETTING_OVERLAP_MS, 10);
 	}
-	void Process(float *out, uint32 numSamples)
+	void Process(float *out, uint32 numSamples, float mix)
 	{
 		m_receiveBuffer.resize(numSamples * 2);
 		m_soundtouch.setPitchSemiTones(pitch);
@@ -766,7 +781,7 @@ public:
 		uint32 receivedSamples = m_soundtouch.receiveSamples(m_receiveBuffer.data(), numSamples);
 		if (receivedSamples > 0)
 		{
-			memcpy(out, m_receiveBuffer.data(), receivedSamples * sizeof(float) * 2);
+			for (uint32 i=0; i<receivedSamples*2; ++i) out[i] += (m_receiveBuffer[i]-out[i])*mix;
 		}
 	}
 };
@@ -782,8 +797,36 @@ PitchShiftDSP::~PitchShiftDSP()
 }
 void PitchShiftDSP::Process(float *out, uint32 numSamples)
 {
+    if (chunkSize > 0) {
+        const uint32 size = std::max(2u, uint32(std::clamp(chunkSize, 2, 44100) * (double(m_sampleRate)/44100.0)));
+        const uint32 capacity = std::max(8u, size*4);
+        if (m_grainBuffer.size() != capacity*2) {
+            m_grainBuffer.assign(capacity*2,0.f); m_grainCursor=0; m_grainPhase=0;
+        }
+        const double speed = std::pow(2.0, std::clamp(double(amount),-48.0,48.0)/12.0);
+        const double fade = std::clamp(double(overlap),0.001,0.5);
+        auto read = [&](double delay,int ch) {
+            double index=std::fmod(double(m_grainCursor)+capacity-delay, double(capacity));
+            if(index<0) index+=capacity;
+            const uint32 lo=uint32(index); const float t=float(index-lo);
+            return m_grainBuffer[lo*2+ch]*(1-t)+m_grainBuffer[((lo+1)%capacity)*2+ch]*t;
+        };
+        for(uint32 i=0;i<numSamples;++i) {
+            for(int ch=0;ch<2;++ch) m_grainBuffer[m_grainCursor*2+ch]=out[i*2+ch];
+            const double p=m_grainPhase, p2=std::fmod(p+0.5,1.0);
+            auto window=[&](double phase){return std::min(1.0,std::min(phase,1-phase)/fade);};
+            const double w1=window(p),w2=window(p2),sum=std::max(1e-9,w1+w2);
+            if(amount!=0 && mix!=0) for(int ch=0;ch<2;++ch) {
+                const float wet=float((read(1+p*size,ch)*w1+read(1+p2*size,ch)*w2)/sum);
+                out[i*2+ch]+=(wet-out[i*2+ch])*mix;
+            }
+            m_grainPhase=std::fmod(m_grainPhase+(1-speed)/size+1.0,1.0);
+            m_grainCursor=(m_grainCursor+1)%capacity;
+        }
+        return;
+    }
 	m_impl->pitch = Math::Clamp(amount, -48.0f, 48.0f);
 	if (!m_impl->init)
 		m_impl->Init(m_sampleRate);
-	m_impl->Process(out, numSamples);
+	m_impl->Process(out, numSamples, mix);
 }

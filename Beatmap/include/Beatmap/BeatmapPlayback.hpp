@@ -148,6 +148,16 @@ public:
 	[[nodiscard]]
 	Vector<String> GetStateString() const;
 
+    float ObjectViewDistance(const ObjectState* obj, bool end = false) const
+    {
+        const auto times = m_beatmap->GetVisualTimes(obj);
+        if (!cMod && m_beatmap->GetKSONScroll()) {
+            const auto& scroll = *m_beatmap->GetKSONScroll();
+            return float(scroll.Position(end ? times.second : times.first) - scroll.Position(m_playbackTime));
+        }
+        return TimeToViewDistance(MapTime(end ? times.second : times.first));
+    }
+
 private:
 	// Selects an object or timing point based on a given input state
 	// if allowReset is true the search starts from the start of the object list if current point lies beyond given input time
@@ -165,6 +175,9 @@ private:
 	bool IsEndTiming(const Beatmap::TimingPointsIterator& obj) const;
 	[[nodiscard]]
 	bool IsEndLaneToggle(const Beatmap::LaneTogglePointsIterator& obj) const;
+
+    struct VisualBounds { ObjectState* object; double low, high; };
+    std::vector<VisualBounds> m_visualBounds;
 
 	// Current map position of this playback object
 	MapTime m_playbackTime;

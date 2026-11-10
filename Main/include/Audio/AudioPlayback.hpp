@@ -1,4 +1,5 @@
 #pragma once
+#include <Beatmap/LaserAudioSampler.hpp>
 #include <Beatmap/Beatmap.hpp>
 #include <Beatmap/AudioEffects.hpp>
 #include <Audio/AudioStream.hpp>
@@ -16,6 +17,8 @@ public:
 
 	// Creates a DSP matching this effect
 	DSP *CreateDSP(const TimingPoint &tp, float filterInput, uint32 sampleRate, float playbackSpeed);
+    // Update coefficients/parameters without replacing the playing DSP.
+    bool UpdateDSP(DSP* dsp, const TimingPoint& tp, float filterInput, uint32 sampleRate, float playbackSpeed);
 	// Applies the given parameters overriding some settings for this effect (depending on the effect)
 	void SetParams(DSP *dsp, AudioPlayback &playback, HoldObjectState *object);
 };
@@ -65,7 +68,7 @@ public:
 	void SetLaserEffect(EffectType type);
 
 	// The input which controls the laser filter amount
-	void SetLaserFilterInput(float input, bool active = false);
+	void SetLaserFilterInput(float input, bool active = false, unsigned eligibleLanes = 3);
 	float GetLaserFilterInput() const;
 
 	// Set the mix value of the effect on lasers
@@ -78,6 +81,7 @@ public:
 	// Toggle FX track or normal track
 	// this is just to support maps that do actually have an FX track
 	void SetFXTrackEnabled(bool enabled);
+    void SetFXTrackState(bool fxActive, bool laserActive);
 
 	// Switch audio track
 	void SetSwitchableTrackEnabled(size_t index, bool enabled);
@@ -93,10 +97,24 @@ public:
 	Ref<AudioStream> GetMusic() const { return m_music; }
 
 private:
+    AudioEffect m_ResolveEffect(EffectType type, bool filter) const;
+    AudioEffect m_ResolveInactiveEffect(EffectType type) const;
+    void m_UpdateAutomation(MapTime time);
+    void m_ConfigureGateClock(class DSP* dsp, const AudioEffect& effect);
+    MapTime m_automationTimingTime = std::numeric_limits<MapTime>::min();
+    void m_UpdateIndependentFXMix();
+    std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides, m_inactiveOverrides;
+    std::map<EffectType, MapTime> m_filterCaptureTimes;
+    MapTime m_lastCaptureTime = std::numeric_limits<MapTime>::min();
+    size_t m_automationCursor = 0;
+    MapTime m_automationTime = std::numeric_limits<MapTime>::min();
 	// Returns the track that should have effects applied to them
 	Ref<AudioStream> m_GetDSPTrack();
 	void m_CleanupDSP(class DSP *&ptr);
-	void m_SetLaserEffectParameter(float input);
+	void m_SetLaserEffectParameter(float input, class DSP* dsp);
+    void m_MirrorLaserDSP(class DSP* original, GameAudioEffect effect, float input, bool ordinary);
+    std::map<class DSP*, class DSP*> m_legacyDryDSPs;
+    bool m_singleF = false;
 	void m_PreRenderDSPTrack();
 
 	// Map player
@@ -108,6 +126,8 @@ private:
 
 	Ref<AudioStream> m_music;
 	Ref<AudioStream> m_fxtrack;
+    Ref<AudioStream> m_legacyP, m_legacyFP;
+    bool m_legacyFXActive=false, m_legacyLaserActive=false;
 	Vector<SwitchableAudio> m_switchables;
 	Vector<int32> m_enabledSwitchables;
 	int32 m_laserSwitchable = -1;
@@ -122,6 +142,7 @@ private:
 	class DSP *m_laserDSP = nullptr;
 	float m_laserEffectMix = 1.0f;
 	float m_laserInput = 0.0f;
+    LaserAudioSampler m_laserAudioSampler;
 	struct NamedLaserFilterState
 	{
 		GameAudioEffect effect;
@@ -134,6 +155,8 @@ private:
 	class DSP *m_buttonDSPs[2] = {nullptr};
 	HoldObjectState *m_currentHoldEffects[2] = {nullptr};
 	float m_effectMix[2] = {0.0f};
+    bool m_effectEnabled[2] = {false,false};
+    uint32 m_lastEnabledFXLane = 0;
 
 	bool m_SkipEffectIfInputIsZero();
 };

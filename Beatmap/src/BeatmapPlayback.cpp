@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "BeatmapPlayback.hpp"
+#include <algorithm>
+#include <cmath>
 
 BeatmapPlayback::BeatmapPlayback(const Beatmap& beatmap) : m_beatmap(&beatmap)
 {
@@ -7,6 +9,16 @@ BeatmapPlayback::BeatmapPlayback(const Beatmap& beatmap) : m_beatmap(&beatmap)
 
 bool BeatmapPlayback::Reset(MapTime initTime, MapTime start)
 {
+    m_visualBounds.clear();
+    if (m_beatmap && m_beatmap->GetKSONScroll()) {
+        const auto& scroll = *m_beatmap->GetKSONScroll();
+        for (const auto& obj : m_beatmap->GetObjectStates()) {
+            if (obj->type == ObjectType::Event) continue;
+            const auto times = m_beatmap->GetVisualTimes(obj.get());
+            const auto bounds = scroll.Bounds(times.first, times.second);
+            m_visualBounds.push_back({obj.get(), bounds.first, bounds.second});
+        }
+    }
 	m_effectObjects.clear();
 
 	if (!m_beatmap || !m_beatmap->HasObjectState())
@@ -337,7 +349,19 @@ void BeatmapPlayback::GetObjectsInViewRange(float numBeats, Vector<ObjectState*>
 		return;
 	}
 
+    if (!cMod && m_beatmap->GetKSONScroll()) {
+        const double origin = m_beatmap->GetKSONScroll()->Position(m_playbackTime);
+        // Bounds include interior extrema and past notes that return in reverse.
+        // One subtraction per bound; no graph integration or mesh allocation here.
+        for (const auto& entry : m_visualBounds) {
+            if (!m_playRange.Includes(entry.object->time)) continue;
+            if (entry.low - origin <= numBeats + 0.5 && entry.high - origin >= -0.5)
+                objects.Add(entry.object);
+        }
+        return;
+    }
 	// Add objects
+	const bool mayReverseScroll = false && !cMod && m_beatmap->HasReverseScroll();
 	for (auto& it : m_objectsByTime)
 	{
 		objects.Add(it.second);
@@ -364,19 +388,54 @@ void BeatmapPlayback::GetObjectsInViewRange(float numBeats, Vector<ObjectState*>
 			continue;
 		}
 
-		if (!IsEndTiming(tp_next) && tp_next->time <= objTime)
+		float objBeats;
+		if (mayReverseScroll)
 		{
-			currBeats += GetViewDistance(currRefTime, tp_next->time);
+			// Full relative distance is required: a later object can come back
+			// into view after a large positive or negative speed excursion.
+			objBeats = GetViewDistance(m_playbackTime, objTime);
+			if (!std::isfinite(objBeats))
+				continue;
 
-			tp = tp_next;
-			tp_next = std::next(tp_next);
-			currRefTime = tp->time;
+			float endBeats = objBeats;
+
+			const MultiObjectState* state = *obj->get();
+
+			if (state->type == ObjectType::Laser)
+			{
+				endBeats = GetViewDistance(
+					m_playbackTime, objTime + state->laser.duration);
+			}
+			else if (state->type == ObjectType::Hold)
+			{
+				endBeats = GetViewDistance(
+					m_playbackTime, objTime + state->hold.duration);
+			}
+
+			if (!std::isfinite(endBeats))
+				continue;
+
+			// Test the segment's range, not just the start position. This
+			// is deliberately conservative for reverse-scrolling long notes.
+			if (std::min(objBeats, endBeats) >= numBeats ||
+				std::max(objBeats, endBeats) < -0.5f)
+				continue;
 		}
-
-		const float objBeats = currBeats + GetViewDistance(currRefTime, objTime);
-		if (objBeats >= numBeats)
+		else
 		{
-			break;
+			// Original fast path for ordinary charts.
+			if (!IsEndTiming(tp_next) && tp_next->time <= objTime)
+			{
+				currBeats += GetViewDistance(currRefTime, tp_next->time);
+
+				tp = tp_next;
+				tp_next = std::next(tp_next);
+				currRefTime = tp->time;
+			}
+
+			objBeats = currBeats + GetViewDistance(currRefTime, objTime);
+			if (objBeats >= numBeats)
+				break;
 		}
 
 		// Lasers might be already added before
@@ -404,6 +463,13 @@ constexpr uint64 MAX_DISP_BAR_COUNT = 1000;
 
 void BeatmapPlayback::GetBarPositionsInViewRange(float numBeats, Vector<float>& barPositions) const
 {
+    if (!m_isCalibration && !cMod && m_beatmap->GetKSONScroll()) {
+        const double origin=m_beatmap->GetKSONScroll()->Position(m_playbackTime);
+        for(double p:m_beatmap->GetKSONBars())
+            if(p-origin>=-0.5 && p-origin<=numBeats && barPositions.size()<MAX_DISP_BAR_COUNT)
+                barPositions.Add(float(p-origin));
+        return;
+    }
 	uint64 measureNo = 0;
 	MapTime currTime = 0;
 
@@ -551,6 +617,9 @@ float BeatmapPlayback::GetZoom(uint8 index) const
 		break;
 	case 4:
 		return m_beatmap->GetCenterSplitValueAt(m_playbackTime);
+		break;
+	case 5:
+		graphType = EffectTimeline::GraphType::KSON_ROTATION_DEG;
 		break;
 	default:
 		assert(false);

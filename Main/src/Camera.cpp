@@ -2,6 +2,7 @@
 #include "Camera.hpp"
 #include "Application.hpp"
 #include "Track.hpp"
+#include <Beatmap/KSONScroll.hpp>
 
 const float ZOOM_POW = 1.65f;
 
@@ -121,7 +122,7 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	const TimingPoint& currentTimingPoint = playback.GetCurrentTimingPoint();
 	// Percentage of m_rollIntensity where camera rolls at its slowest rate
 	const float slowestTiltThreshold = 0.1f;
-	const float rollSpeed = 4;
+	const float rollSpeed = (m_kshVersion >= 0 && m_kshVersion < 121) ? 6.0f : 4.0f;
 	float speedLimit = MAX_ROLL_ANGLE * rollSpeed;
 	float actualRollTarget = 0;
 
@@ -131,49 +132,31 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 		speedLimit /= fabsf(m_critLineRoll) > MAX_ROLL_ANGLE * slowestTiltThreshold ? 4.f : 8.f;
 	LerpTo(m_critLineRoll, m_targetCritLineRoll, speedLimit);
 
-	if (pManualTiltEnabled)
-	{
-		if (m_manualTiltInstant)
-			m_actualRoll = pLaneTilt;
-		else
-			// Lerp to manual tilt value
-			actualRollTarget = pLaneTilt;
-	}
-	else if (m_rollKeep)
-	{
-		actualRollTarget = m_rollKeepTargetRoll * m_rollIntensity;
-	}
-	else
-	{
-		// Get highway tilt target based off of crit line position
-		actualRollTarget = (m_critLineRoll / MAX_ROLL_ANGLE) * m_rollIntensity;
-	}
+    // Automatic tilt continues evolving beneath the manual graph. Mixing a
+    // separate state avoids feeding a large manual rotation back into auto tilt.
+    actualRollTarget = m_rollKeep ? m_rollKeepTargetRoll * m_rollIntensity
+        : (m_critLineRoll / MAX_ROLL_ANGLE) * m_rollIntensity;
+    speedLimit = rollSpeed * Math::Max(m_rollIntensity, m_oldRollIntensity);
+    if (speedLimit == 0) speedLimit = MAX_ROLL_ANGLE * rollSpeed * 2.5f;
+    const double tiltTime = playback.GetLastTime();
+    if (tiltTime < m_lastTiltTime) {
+        m_autoRoll = 0;
+        m_manualRoll = pLaneTilt;
+        m_manualBlend = pManualTiltEnabled ? 1.f : 0.f;
+    }
+    m_lastTiltTime = tiltTime;
+    LerpTo(m_autoRoll, actualRollTarget, speedLimit);
+    if (pManualTiltEnabled) {
+        if (m_manualTiltInstant) m_manualRoll = pLaneTilt;
+        else LerpTo(m_manualRoll, pLaneTilt, MAX_ROLL_ANGLE * rollSpeed * 2.5f);
+    }
+    // KSM's manual contribution enters/leaves over 40ms, retaining the last
+    // manual value on exit. Reversing a transition reverses this same weight.
+    m_manualBlend = Math::Clamp(m_manualBlend + deltaTime / 0.040f *
+        (pManualTiltEnabled ? 1.f : -1.f), 0.f, 1.f);
+    m_actualRoll = m_manualBlend >= 1.f ? m_manualRoll :
+        m_autoRoll + (m_manualRoll - m_autoRoll) * m_manualBlend;
 
-	// Roll to crit line position or roll keep value with respect to roll intensity
-	// 2.5 corresponds to BIGGEST roll speed
-	// Don't respect roll intensity if manual tilt is on, was recently toggled (off) or if roll speed is somehow 0
-	speedLimit = MAX_ROLL_ANGLE * rollSpeed *
-		Math::Max(m_rollIntensity, m_oldRollIntensity) / MAX_ROLL_ANGLE;
-	if (speedLimit == 0 || pManualTiltEnabled || m_manualTiltRecentlyToggled)
-		speedLimit = MAX_ROLL_ANGLE * rollSpeed * 2.5f;
-
-	if (pManualTiltEnabled || m_manualTiltRecentlyToggled)
-	{
-		// If there's more than a 10 degree delta between the tilt target and the current roll,
-		// increase roll speed to catch up
-		float delta = fabsf(m_actualRoll - actualRollTarget) - MAX_ROLL_ANGLE;
-		if (delta > 0)
-			speedLimit *= 1 + (delta * 360 / 2.5f);
-	}
-
-	if (!m_manualTiltInstant)
-		// Lerp highway tilt
-		LerpTo(m_actualRoll, actualRollTarget, speedLimit);
-
-	if (m_manualTiltRecentlyToggled)
-		// Check if roll has met target
-		m_manualTiltRecentlyToggled = m_actualRoll != actualRollTarget;
-	
 	for (int index = 0; index < 2; ++index)
 	{
 		m_rollIgnoreTimer[index] -= deltaTime;
@@ -183,7 +166,14 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 			m_slamRoll[index] = 0;
 	}
 
-	m_spinProgress = (float)(playback.GetLastTime() - m_spinStart) / m_spinDuration;
+	m_spinProgress = m_spinDuration > 0 ? (float)(playback.GetLastTime() - m_spinStart) / m_spinDuration : 2.0f;
+    if(m_nativeSpinLength) {
+        const auto now=playback.GetLastTime();
+        if(now<m_nativeSpinLastTime) { m_nativeSpinLength=0; m_spinDuration=0; m_spinProgress=2; }
+        else if(const auto* scroll=playback.GetBeatmap().GetKSONScroll())
+            m_spinProgress=float(2*(scroll->Pulse(now)-m_nativeSpinStart)/m_nativeSpinLength);
+        m_nativeSpinLastTime=now;
+    }
 	// Calculate camera spin
 	// TODO(local): spins need a progress of 1
 	if (m_spinProgress < 2.0f)
@@ -216,7 +206,27 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	}
 
 	m_totalRoll = m_spinRoll + m_actualRoll;
-	m_totalOffset = (pLaneOffset * (5 * 100) / (6 * 116)) / 2.0f + m_spinBounceOffset;
+	const bool legacyZoom = m_kshVersion >= 0 && m_kshVersion < 167;
+    float renderPitch = pLanePitch, renderZoom = pLaneZoom, renderOffset = pLaneOffset;
+    if (legacyZoom) {
+        if (!m_legacyCameraInitialized) {
+            m_legacyPitch = pLanePitch; m_legacyZoom = pLaneZoom; m_legacyOffset = pLaneOffset;
+            m_legacyCameraInitialized = true;
+        }
+        const float rate = Math::Clamp(deltaTime / 0.040f, 0.0f, 1.0f);
+        m_legacyPitch += (pLanePitch - m_legacyPitch) * rate;
+        m_legacyZoom += (pLaneZoom - m_legacyZoom) * rate;
+        m_legacyOffset += (pLaneOffset - m_legacyOffset) * rate;
+        renderPitch = m_legacyPitch; renderZoom = m_legacyZoom; renderOffset = m_legacyOffset;
+    }
+    double nativeOffset=0;
+    if(const auto* scroll=playback.GetBeatmap().GetKSONScroll()) {
+        const double now=playback.GetLastTime();
+        if(now<m_nativeSwingLastTime) m_nativeSwing.length=0;
+        m_nativeSwingLastTime=now;
+        nativeOffset=m_nativeSwing.Offset(scroll->Pulse(now)-m_nativeSwingStart);
+    }
+    m_totalOffset = ((renderOffset + nativeOffset) * (5 * 100) / (6 * 116)) / 2.0f + m_spinBounceOffset;
 
 	// Update camera shake effects
 	if (m_shakeEffect.amplitudeToBeAdded != 0)
@@ -233,9 +243,12 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 	m_shakeOffset = m_shakeEffect.amplitude;
 	m_shakeEffect.guard -= deltaTime;
 
-	float lanePitch = PitchScaleFunc(pLanePitch) * pitchUnit;
+	float lanePitch = legacyZoom ? 0.0f : PitchScaleFunc(renderPitch) * pitchUnit;
 
-	worldNormal = GetOriginTransform(lanePitch, m_totalOffset, m_totalRoll * 360.0f);
+	// Add KSON rotation_deg after normal/manual tilt composition.
+	// Reduce very large authored rotations modulo 360 before trigonometry.
+	const float renderKSONRotation = fmodf(pKSONRotationDegrees, 360.0f);
+	worldNormal = GetOriginTransform(lanePitch, m_totalOffset, m_totalRoll * 360.0f + renderKSONRotation);
 	worldNoRoll = GetOriginTransform(lanePitch, 0, 0);
 
 	auto GetZoomedTransform = [&](Transform t)
@@ -245,15 +258,26 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 		zoomDir = zoomDir.Normalized();
 
 		float zoomAmt;
-		if (pLaneZoom <= 0) zoomAmt = pow(ZOOM_POW, -pLaneZoom) - 1;
-		else zoomAmt = highwayDist * (pow(ZOOM_POW, -pow(pLaneZoom, 1.35f)) - 1);
+		if (renderZoom <= 0) zoomAmt = pow(ZOOM_POW, -renderZoom) - 1;
+		else zoomAmt = highwayDist * (pow(ZOOM_POW, -pow(renderZoom, 1.35f)) - 1);
 
 		return Transform::Translation(zoomDir * zoomAmt) * t;
 	};
 
 	track->trackOrigin = GetZoomedTransform(worldNormal);
+    if (legacyZoom) {
+        // KSM's old zoom_top displaces the far edge linearly; it does not rotate it.
+        // Normalize the reference displacement by its 599.48-unit above-line height.
+        double top = renderPitch * 100.0 / 75.0;
+        if (top <= 0) top /= 2.5;
+        const double shift = top * 100.0 / (936.0 * 13.0 / 20.0 * (1.0 - 14.0 / 1024.0));
+        Transform shear;
+        shear[5] = 1.0f + float(shift * std::cos(-0.6125));
+        shear[6] = float(-shift * std::sin(-0.6125));
+        track->trackOrigin *= shear;
+    }
 
-	critOrigin = GetZoomedTransform(GetOriginTransform(lanePitch, m_totalOffset, m_actualRoll * 360.0f + sin(m_spinRoll * Math::pi * 2) * 20));
+	critOrigin = GetZoomedTransform(GetOriginTransform(lanePitch, m_totalOffset, m_actualRoll * 360.0f + sin(m_spinRoll * Math::pi * 2) * 20 + renderKSONRotation));
 }
 void Camera::AddCameraShake(float cameraShake)
 {
@@ -323,9 +347,6 @@ void Camera::SetSlamShakeGuardDuration(int refreshRate)
 
 void Camera::SetManualTilt(bool manualTilt)
 {
-	if (pManualTiltEnabled != manualTilt)
-		m_manualTiltRecentlyToggled = true;
-
 	pManualTiltEnabled = manualTilt;
 }
 
@@ -391,9 +412,10 @@ RenderState Camera::CreateRenderState(bool clipped)
 
 void Camera::SetTargetRoll(float target)
 {
-	auto ShouldRollDuringKeep = [](float target, float roll)
+	auto ShouldRollDuringKeep = [&](float target, float roll)
 	{
-		return (roll == 0) || (Math::Sign(roll) == Math::Sign(target) && fabsf(roll) < fabsf(target));
+		return (roll == 0) || (Math::Sign(roll) == Math::Sign(target) && fabsf(roll) < fabsf(target)) ||
+            (m_legacyKeep && target != 0 && Math::Sign(roll) != Math::Sign(target));
 	};
 
 	float slamRollTotal = m_slamRoll[0] + m_slamRoll[1];
@@ -406,7 +428,7 @@ void Camera::SetTargetRoll(float target)
 		m_rollKeepTargetRoll = actualTarget;
 }
 
-void Camera::SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback)
+void Camera::SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback, uint32 nativeLength)
 {
 	const TimingPoint& currentTimingPoint = playback.GetCurrentTimingPoint();
 
@@ -414,6 +436,10 @@ void Camera::SetSpin(float direction, uint32 duration, uint8 type, class Beatmap
 	m_spinDuration = (duration / 192.0f) * (currentTimingPoint.beatDuration) * 4;
 	m_spinStart = playback.GetLastTime();
 	m_spinType = type;
+    m_nativeSpinLength = nativeLength;
+    m_nativeSpinLastTime = playback.GetLastTime();
+    if(const auto* scroll=playback.GetBeatmap().GetKSONScroll())
+        m_nativeSpinStart=scroll->Pulse(m_nativeSpinLastTime);
 }
 
 void Camera::SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude, uint32 frequency, float decay, class BeatmapPlayback &playback)
@@ -425,6 +451,7 @@ void Camera::SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude
 	m_spinDuration = 0.5f * (duration / 192.0f) * (currentTimingPoint.beatDuration) * 4;
 	m_spinStart = playback.GetLastTime();
 	m_spinType = SpinStruct::SpinType::Bounce;
+    m_nativeSpinLength = 0;
 
 	m_spinBounceAmplitude = amplitude / 250.0f;
 	m_spinBounceFrequency = frequency;
@@ -492,4 +519,13 @@ float Camera::m_ClampRoll(float in) const
 		// Keep sign and modulo
 		return sign * fmodf(ain, 1.0f);
 	}
+}
+
+void Camera::SetNativeSwing(const KSONSwing& swing, BeatmapPlayback& playback)
+{
+    if(const auto* scroll=playback.GetBeatmap().GetKSONScroll()) {
+        m_nativeSwing=swing;
+        m_nativeSwingLastTime=playback.GetLastTime();
+        m_nativeSwingStart=scroll->Pulse(m_nativeSwingLastTime);
+    }
 }

@@ -946,7 +946,9 @@ bool Application::m_Init()
 	Logf("Version: %s", Logger::Severity::Info, version.c_str());
 
 #ifdef EMBEDDED
-	Log("Embeedded version.");
+	Log("Embedded renderer: OpenGL ES (EMBEDDED=ON).");
+#else
+    Log("Desktop renderer: OpenGL (EMBEDDED=OFF).");
 #endif
 
 #ifdef GIT_COMMIT
@@ -1758,16 +1760,20 @@ Material Application::LoadMaterial(const String &name, const String &path)
 	pathF = Path::Absolute(pathF);
 	pathG = Path::Absolute(pathG);
 	Material ret = MaterialRes::Create(g_gl, pathV, pathF);
-	// Additionally load geometry shader
+	if (!ret) {
+        g_gameWindow->ShowMessageBox("Shader Error", "Could not load shaders " + path + name + ".vs and " + path + name + ".fs", 0);
+        return ret;
+    }
+    // Additionally load geometry shader
 	if (Path::FileExists(pathG))
 	{
 		Shader gshader = ShaderRes::Create(g_gl, ShaderType::Geometry, pathG);
-		assert(gshader);
+		if (!gshader) {
+            Logf("Failed to load geometry shader: %s", Logger::Severity::Error, pathG);
+            return Material();
+        }
 		ret->AssignShader(ShaderType::Geometry, gshader);
 	}
-	if (!ret)
-		g_gameWindow->ShowMessageBox("Shader Error", "Could not load shaders "+path+name+".vs and "+path+name+".fs", 0);
-	assert(ret);
 	return ret;
 }
 Material Application::LoadMaterial(const String &name)

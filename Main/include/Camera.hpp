@@ -1,4 +1,5 @@
 #pragma once
+#include <Beatmap/KSONSwing.hpp>
 
 /*
 	Camera shake effect.
@@ -39,6 +40,9 @@ public:
 	// Changes the amount of roll applied when lasers are controlled, default = 1
 	void SetRollIntensity(float val);
 	void SetRollKeep(bool rollKeep);
+    void SetKSHCompatibility(int version, bool legacyKeep) {
+        m_kshVersion = version; m_legacyKeep = legacyKeep;
+    }
 	
 	/*
 	Sets laser slam amount
@@ -61,7 +65,8 @@ public:
 	void SetSlowTilt(bool tilt);
 	void SetLasersActive(bool lasersActive);
 	void SetTargetRoll(float target);
-	void SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback);
+	void SetSpin(float direction, uint32 duration, uint8 type, class BeatmapPlayback& playback, uint32 nativeLength = 0);
+	void SetNativeSwing(const KSONSwing& swing, class BeatmapPlayback& playback);
 	void SetXOffsetBounce(float direction, uint32 duration, uint32 amplitude, uint32 frequency, float decay, class BeatmapPlayback &playback);
 	[[nodiscard]]
 	float GetRoll() const;
@@ -119,6 +124,7 @@ public:
 	float pLaneZoom = 0.0f;
 	float pLanePitch = 0.0f;
 	float pLaneTilt = 0.0f;
+	float pKSONRotationDegrees = 0.0f; // independent highway + crit-line rotation
 	bool pManualTiltEnabled = false;
 
 	float pitchUnit = KSM_PITCH_UNIT_POST_168;
@@ -135,10 +141,20 @@ public:
 	Transform critOrigin;
 
 private:
+    int m_kshVersion = -1;
+    bool m_legacyKeep = false;
+    bool m_legacyCameraInitialized = false;
+    float m_legacyPitch = 0, m_legacyZoom = 0, m_legacyOffset = 0;
 	float m_ClampRoll(float in) const;
 	// x offset
 	float m_totalOffset = 0.0f;
 	float m_spinBounceOffset = 0.0f;
+    uint32 m_nativeSpinLength = 0;
+    double m_nativeSpinStart = 0;
+    double m_nativeSpinLastTime = 0;
+    KSONSwing m_nativeSwing;
+    double m_nativeSwingStart = 0;
+    double m_nativeSwingLastTime = -1;
 	// roll value
 	float m_totalRoll = 0.0f;
 	// Used for crit line position
@@ -157,7 +173,10 @@ private:
 	float m_oldRollIntensity = MAX_ROLL_ANGLE;
 	bool m_rollKeep = false;
 	bool m_manualTiltInstant = false;
-	bool m_manualTiltRecentlyToggled = false;
+    float m_autoRoll = 0.f;
+    float m_manualRoll = 0.f;
+    float m_manualBlend = 0.f;
+    double m_lastTiltTime = -1;
 
 	// Controls if the camera rolls at a slow rate
 	// Activates when blue and red lasers are at the extremities (-1, 1 or 0, 0)

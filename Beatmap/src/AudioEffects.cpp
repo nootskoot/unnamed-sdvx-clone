@@ -85,6 +85,9 @@ static AudioEffect CreateDefault(EffectType type)
 	case EffectType::Echo:
 		ret.echo.feedback = FloatRange(0.60f);
 		break;
+	case EffectType::PitchShift:
+        ret.pitchshift.amount = FloatRange(12.0f);
+        break;
 	case EffectType::Panning:
 		ret.panning.panning = FloatRange(0.0f);
 		break;
