@@ -612,9 +612,13 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 			{
 				String audioFX, audioNoFX;
 				s.second.Split(";", &audioNoFX, &audioFX);
-				size_t splitMore = audioFX.find(';');
-				if (splitMore != -1)
-					audioFX = audioFX.substr(0, splitMore);
+                size_t splitMore = audioFX.find(';');
+                if (splitMore != String::npos) {
+                    String remaining=audioFX.substr(splitMore+1);
+                    audioFX=audioFX.substr(0,splitMore);
+                    if (!remaining.Split(";", &m_settings.audioLaserFX, &m_settings.audioCombinedFX))
+                        m_settings.audioLaserFX=remaining;
+                }
 				m_settings.audioFX = audioFX;
 				m_settings.audioNoFX = audioNoFX;
 			}

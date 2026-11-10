@@ -173,7 +173,10 @@ private:
 	float m_oldRollIntensity = MAX_ROLL_ANGLE;
 	bool m_rollKeep = false;
 	bool m_manualTiltInstant = false;
-	bool m_manualTiltRecentlyToggled = false;
+    float m_autoRoll = 0.f;
+    float m_manualRoll = 0.f;
+    float m_manualBlend = 0.f;
+    double m_lastTiltTime = -1;
 
 	// Controls if the camera rolls at a slow rate
 	// Activates when blue and red lasers are at the extremities (-1, 1 or 0, 0)

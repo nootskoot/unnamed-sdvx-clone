@@ -38,6 +38,8 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 	m_CleanupDSP(m_buttonDSPs[1]);
 	m_CleanupDSP(m_laserDSP);
 
+    m_fxtrack.reset(); m_legacyP.reset(); m_legacyFP.reset();
+    m_legacyFXActive=m_legacyLaserActive=false;
 	m_playback = &playback;
 	m_beatmap = &playback.GetBeatmap();
     m_laserAudioSampler.Build(*m_beatmap);
@@ -88,6 +90,22 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 		}
 	}
 
+    if (m_fxtrack && !mapSettings.audioLaserFX.empty() && !mapSettings.audioCombinedFX.empty()) {
+        auto loadStem=[&](String name) -> Ref<AudioStream> {
+            name.TrimBack(' ');
+            const auto resource=m_chartSource->ResolvePath(name);
+            if (!resource.IsValid() || (resource.IsPath() && Path::IsDirectory(resource.GetPath()))) return {};
+            auto stream=g_audio->CreateStream(resource,true);
+            if (stream) stream->SetVolume(0.f);
+            return stream;
+        };
+        m_legacyP=loadStem(mapSettings.audioLaserFX);
+        m_legacyFP=loadStem(mapSettings.audioCombinedFX);
+        if (!m_legacyP || !m_legacyFP) {
+            Logf("Incomplete legacy P/FP stems; using the existing single FX-track fallback.",Logger::Severity::Warning);
+            m_legacyP.reset();m_legacyFP.reset();
+        } else SetFXTrackState(false,false);
+    }
 	if (m_fxtrack)
 	{
 		// Prevent loading switchables if fx track is in use.
@@ -282,6 +300,8 @@ void AudioPlayback::Play()
 	m_music->Play();
 	if (m_fxtrack)
 		m_fxtrack->Play();
+    if (m_legacyP) m_legacyP->Play();
+    if (m_legacyFP) m_legacyFP->Play();
 	for (auto it = m_switchables.begin(); it != m_switchables.end(); ++it)
 		if (it->m_audio)
 			it->m_audio->Play();
@@ -301,6 +321,8 @@ void AudioPlayback::SetPosition(MapTime time)
 	m_music->SetPosition(time);
 	if (m_fxtrack)
 		m_fxtrack->SetPosition(time);
+    if (m_legacyP) m_legacyP->SetPosition(time);
+    if (m_legacyFP) m_legacyFP->SetPosition(time);
 	for (auto it = m_switchables.begin(); it != m_switchables.end(); ++it)
 		if (it->m_audio)
 			it->m_audio->SetPosition(time);
@@ -320,6 +342,8 @@ void AudioPlayback::Pause()
 	m_music->Pause();
 	if (m_fxtrack)
 		m_fxtrack->Pause();
+    if (m_legacyP) m_legacyP->Pause();
+    if (m_legacyFP) m_legacyFP->Pause();
 	for (auto it = m_switchables.begin(); it != m_switchables.end(); ++it)
 		if (it->m_audio)
 			it->m_audio->Pause();
@@ -448,6 +472,8 @@ bool AudioPlayback::m_SkipEffectIfInputIsZero()
 }
 void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligibleLanes)
 {
+    // P/FP already contain laser effects. Applying a live DSP would double them.
+    if (m_legacyP && m_legacyFP) { m_laserInput=input; return; }
     if(m_laserEffect.type==EffectType::PeakingFilter && m_beatmap && m_playback &&
        m_beatmap->GetMapSettings().peakingFilterDelay>0 && !m_fxtrack) {
         active=m_laserAudioSampler.Sample(double(m_playback->GetLastTime())-
@@ -601,6 +627,15 @@ Ref<AudioStream> AudioPlayback::m_GetDSPTrack()
 		return m_fxtrack;
 	return m_music;
 }
+void AudioPlayback::SetFXTrackState(bool fxActive, bool laserActive)
+{
+    m_legacyFXActive=fxActive;m_legacyLaserActive=laserActive;
+    if (!m_legacyP || !m_legacyFP) { SetFXTrackEnabled(fxActive || laserActive); return; }
+    m_music->SetVolume(!fxActive && !laserActive ? m_musicVolume : 0.f);
+    m_fxtrack->SetVolume(fxActive && !laserActive ? m_musicVolume : 0.f);
+    m_legacyP->SetVolume(!fxActive && laserActive ? m_musicVolume : 0.f);
+    m_legacyFP->SetVolume(fxActive && laserActive ? m_musicVolume : 0.f);
+}
 void AudioPlayback::SetFXTrackEnabled(bool enabled)
 {
 	if (!m_fxtrack)
@@ -687,6 +722,8 @@ void AudioPlayback::SetPlaybackSpeed(float speed)
 	m_music->PlaybackSpeed = speed;
 	if (m_fxtrack)
 		m_fxtrack->PlaybackSpeed = speed;
+    if (m_legacyP) m_legacyP->PlaybackSpeed=speed;
+    if (m_legacyFP) m_legacyFP->PlaybackSpeed=speed;
 	for (auto it = m_switchables.begin(); it != m_switchables.end(); ++it)
 		if (it->m_audio)
 			it->m_audio->PlaybackSpeed = speed;
@@ -697,6 +734,11 @@ float AudioPlayback::GetPlaybackSpeed() const
 }
 void AudioPlayback::SetVolume(float volume)
 {
+    if (m_legacyP && m_legacyFP) {
+        m_musicVolume=volume;
+        SetFXTrackState(m_legacyFXActive,m_legacyLaserActive);
+        return;
+    }
 	m_music->SetVolume(volume);
 	if (m_fxtrack)
 		m_fxtrack->SetVolume(volume);

@@ -1506,7 +1506,7 @@ public:
 		m_audioPlayback.SetLaserFilterInput(m_scoring.GetLaserOutput(), m_scoring.IsLaserHeld(0, false) || m_scoring.IsLaserHeld(1, false),
             (m_scoring.IsLaserAudioEligible(0) ? 1u : 0u) | (m_scoring.IsLaserAudioEligible(1) ? 2u : 0u));
 
-		m_audioPlayback.SetFXTrackEnabled(m_scoring.GetLaserActive() || m_scoring.GetFXActive());
+		m_audioPlayback.SetFXTrackState(m_scoring.GetFXActive(), m_scoring.GetLaserActive());
 
 		// Stop playing if last gauge has reached its failstate
 		if (m_scoring.IsFailOut())
@@ -2462,7 +2462,7 @@ public:
 		}
 		else if(key == EventKey::TrackRollBehaviour)
 		{
-			m_camera.SetRollKeep((data.rollVal & TrackRollBehaviour::Keep) == TrackRollBehaviour::Keep);
+
 			int32 i = (uint8)data.rollVal & 0x7;
 
 			m_manualTiltEnabled = false;
@@ -2477,6 +2477,8 @@ public:
 			{
 				m_rollIntensity = MAX_ROLL_ANGLE * (1.0 + 0.75 * (i - 1));
 			}
+			if (!m_manualTiltEnabled)
+				m_camera.SetRollKeep((data.rollVal & TrackRollBehaviour::Keep) == TrackRollBehaviour::Keep);
 			m_camera.SetRollIntensity(m_rollIntensity);
 		}
 		else if(key == EventKey::SlamVolume)

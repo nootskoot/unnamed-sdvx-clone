@@ -24,6 +24,7 @@ struct BeatmapSettings
 	// Both audio tracks specified for the map / if any is set
 	String audioNoFX;
 	String audioFX;
+    String audioLaserFX, audioCombinedFX; // Optional legacy P and FP stems; populated on chart load.
     int peakingFilterDelay = 0;
 	// Path to the jacket image
 	String jacketPath;

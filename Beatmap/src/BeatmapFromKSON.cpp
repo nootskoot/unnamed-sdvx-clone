@@ -137,6 +137,16 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             m_settings.difficulty = uint8(3); // KSM v2 maps all custom difficulty names to index 3.
         m_settings.audioNoFX = bgm.value("filename", std::string());
         m_settings.audioFX = "";
+        if (stems.contains("fp_filenames") && stems["fp_filenames"].is_array()) {
+            const auto& files=stems["fp_filenames"];
+            // Complete F/P/FP sets can bypass both effect buses. Keep the
+            // existing switch_audio route for single-F converted charts.
+            if (files.size()>=3 && files[0].is_string() && files[1].is_string() && files[2].is_string()) {
+                m_settings.audioFX=files[0].get<std::string>();
+                m_settings.audioLaserFX=files[1].get<std::string>();
+                m_settings.audioCombinedFX=files[2].get<std::string>();
+            }
+        }
         m_settings.laserEffectMix = .5f;
         m_settings.slamVolume = .5f;
         m_settings.offset = bgm.value("offset", 0);

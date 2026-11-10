@@ -132,49 +132,31 @@ void Camera::Tick(float deltaTime, class BeatmapPlayback& playback)
 		speedLimit /= fabsf(m_critLineRoll) > MAX_ROLL_ANGLE * slowestTiltThreshold ? 4.f : 8.f;
 	LerpTo(m_critLineRoll, m_targetCritLineRoll, speedLimit);
 
-	if (pManualTiltEnabled)
-	{
-		if (m_manualTiltInstant)
-			m_actualRoll = pLaneTilt;
-		else
-			// Lerp to manual tilt value
-			actualRollTarget = pLaneTilt;
-	}
-	else if (m_rollKeep)
-	{
-		actualRollTarget = m_rollKeepTargetRoll * m_rollIntensity;
-	}
-	else
-	{
-		// Get highway tilt target based off of crit line position
-		actualRollTarget = (m_critLineRoll / MAX_ROLL_ANGLE) * m_rollIntensity;
-	}
+    // Automatic tilt continues evolving beneath the manual graph. Mixing a
+    // separate state avoids feeding a large manual rotation back into auto tilt.
+    actualRollTarget = m_rollKeep ? m_rollKeepTargetRoll * m_rollIntensity
+        : (m_critLineRoll / MAX_ROLL_ANGLE) * m_rollIntensity;
+    speedLimit = rollSpeed * Math::Max(m_rollIntensity, m_oldRollIntensity);
+    if (speedLimit == 0) speedLimit = MAX_ROLL_ANGLE * rollSpeed * 2.5f;
+    const double tiltTime = playback.GetLastTime();
+    if (tiltTime < m_lastTiltTime) {
+        m_autoRoll = 0;
+        m_manualRoll = pLaneTilt;
+        m_manualBlend = pManualTiltEnabled ? 1.f : 0.f;
+    }
+    m_lastTiltTime = tiltTime;
+    LerpTo(m_autoRoll, actualRollTarget, speedLimit);
+    if (pManualTiltEnabled) {
+        if (m_manualTiltInstant) m_manualRoll = pLaneTilt;
+        else LerpTo(m_manualRoll, pLaneTilt, MAX_ROLL_ANGLE * rollSpeed * 2.5f);
+    }
+    // KSM's manual contribution enters/leaves over 40ms, retaining the last
+    // manual value on exit. Reversing a transition reverses this same weight.
+    m_manualBlend = Math::Clamp(m_manualBlend + deltaTime / 0.040f *
+        (pManualTiltEnabled ? 1.f : -1.f), 0.f, 1.f);
+    m_actualRoll = m_manualBlend >= 1.f ? m_manualRoll :
+        m_autoRoll + (m_manualRoll - m_autoRoll) * m_manualBlend;
 
-	// Roll to crit line position or roll keep value with respect to roll intensity
-	// 2.5 corresponds to BIGGEST roll speed
-	// Don't respect roll intensity if manual tilt is on, was recently toggled (off) or if roll speed is somehow 0
-	speedLimit = MAX_ROLL_ANGLE * rollSpeed *
-		Math::Max(m_rollIntensity, m_oldRollIntensity) / MAX_ROLL_ANGLE;
-	if (speedLimit == 0 || pManualTiltEnabled || m_manualTiltRecentlyToggled)
-		speedLimit = MAX_ROLL_ANGLE * rollSpeed * 2.5f;
-
-	if (pManualTiltEnabled || m_manualTiltRecentlyToggled)
-	{
-		// If there's more than a 10 degree delta between the tilt target and the current roll,
-		// increase roll speed to catch up
-		float delta = fabsf(m_actualRoll - actualRollTarget) - MAX_ROLL_ANGLE;
-		if (delta > 0)
-			speedLimit *= 1 + (delta * 360 / 2.5f);
-	}
-
-	if (!m_manualTiltInstant)
-		// Lerp highway tilt
-		LerpTo(m_actualRoll, actualRollTarget, speedLimit);
-
-	if (m_manualTiltRecentlyToggled)
-		// Check if roll has met target
-		m_manualTiltRecentlyToggled = m_actualRoll != actualRollTarget;
-	
 	for (int index = 0; index < 2; ++index)
 	{
 		m_rollIgnoreTimer[index] -= deltaTime;
@@ -365,9 +347,6 @@ void Camera::SetSlamShakeGuardDuration(int refreshRate)
 
 void Camera::SetManualTilt(bool manualTilt)
 {
-	if (pManualTiltEnabled != manualTilt)
-		m_manualTiltRecentlyToggled = true;
-
 	pManualTiltEnabled = manualTilt;
 }
 

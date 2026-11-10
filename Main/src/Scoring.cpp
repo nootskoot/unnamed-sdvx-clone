@@ -377,7 +377,25 @@ bool Scoring::GetLaserActive()
 
 bool Scoring::GetFXActive()
 {
-	return IsObjectHeld(4) || IsObjectHeld(5);
+	if (!m_playback)
+		return false;
+	const MapTime now = m_playback->GetLastTime();
+	for (uint32 lane = 4; lane < 6; ++lane)
+	{
+		ObjectState* object = m_holdObjects[lane];
+		if (!object || object->type != ObjectType::Hold)
+			continue;
+		// Scoring retains held objects through the late-hit/leave window.
+		// Audio must stop at the chart endpoint, without changing that window.
+		// Follow linked segments so an effect change inside a held note has
+		// no artificial gap while scoring still references an earlier segment.
+		for (auto* hold = (HoldObjectState*)object; hold; hold = hold->next)
+		{
+			if (now >= hold->time && (int64)now < (int64)hold->time + hold->duration)
+				return true;
+		}
+	}
+	return false;
 }
 
 static const float laserOutputInterpolationDuration = 0.1f;

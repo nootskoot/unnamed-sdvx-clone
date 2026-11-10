@@ -81,6 +81,7 @@ public:
 	// Toggle FX track or normal track
 	// this is just to support maps that do actually have an FX track
 	void SetFXTrackEnabled(bool enabled);
+    void SetFXTrackState(bool fxActive, bool laserActive);
 
 	// Switch audio track
 	void SetSwitchableTrackEnabled(size_t index, bool enabled);
@@ -122,6 +123,8 @@ private:
 
 	Ref<AudioStream> m_music;
 	Ref<AudioStream> m_fxtrack;
+    Ref<AudioStream> m_legacyP, m_legacyFP;
+    bool m_legacyFXActive=false, m_legacyLaserActive=false;
 	Vector<SwitchableAudio> m_switchables;
 	Vector<int32> m_enabledSwitchables;
 	int32 m_laserSwitchable = -1;
