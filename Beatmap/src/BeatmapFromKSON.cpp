@@ -682,6 +682,10 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             if(!parameters.contains("mix")) parameters["mix"]=base=="gate"?"0%>90%":base=="phaser"?"0%>50%":(base=="flanger"||base=="wobble")?"0%>80%":"0%>100%";
             if(base=="bitcrusher"&&!parameters.contains("reduction"))parameters["reduction"]="0samples-30samples";
             if(base=="tapestop"&&!parameters.contains("speed"))parameters["speed"]="50%";
+            // KSON's Off>On defaults must be explicit. The KSH/USC DSP
+            // defaults only describe the active state, not the inactive bus.
+            if(base=="pitch_shift"&&!parameters.contains("pitch"))parameters["pitch"]="0>12";
+            if(base=="sidechain"&&!parameters.contains("ratio"))parameters["ratio"]="1.0>5.0";
             if(base=="sidechain"&&!parameters.contains("release_time"))parameters["release_time"]=(customDefinition && legacyCustomDefaults)?"1/16":"1/8";
             if (overrides.is_object()) for(auto it=overrides.begin();it!=overrides.end();++it) parameters[it.key()]=it.value();
             for(auto it=parameters.begin();it!=parameters.end();++it) {
@@ -786,7 +790,12 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
                         // Same-ms calls share one gameplay interval. Keep the last
                         // authored effect rather than discarding every later call.
                     }
-                    if(call.name.empty()) {hold->effectType=EffectType::None;hold->effectParams[0]=hold->effectParams[1]=-1;continue;}
+                    if(call.name.empty()) {
+                        hold->effectType=EffectType::None;
+                        hold->effectParams[0]=hold->effectParams[1]=-1;
+                        hold->effectParamMask=0;
+                        continue;
+                    }
                     hold->effectType=EffectType(nextEffect++);
                     m_customAudioEffects[hold->effectType]=effect;
                     // The definition already carries native durations and fractional values.
@@ -796,6 +805,7 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
         }
         std::map<std::string,EffectType> laserIds;
         const J& laserEffects=Member(effects,"laser");
+        bool initialLaser=false;
         for(auto named=Member(laserEffects,"pulse_event").begin();named!=Member(laserEffects,"pulse_event").end();++named) {
             const auto effect=MakeEffect(laserEffects,named.key(),J::object());
             if(effect.type==EffectType::None) continue;
@@ -804,12 +814,11 @@ bool Beatmap::m_ProcessKSON(const Resource& resource, bool metadataOnly) {
             laserIds[named.key()]=id;
             for(const auto& event:named.value()) {
                 if(!event.is_number_integer()) continue;
-                AddEvent(GetPulse(event),EventKey::LaserEffectType)->data.effectVal=id;
+                const uint32 y=GetPulse(event);
+                if(y==0) initialLaser=true;
+                AddEvent(y,EventKey::LaserEffectType)->data.effectVal=id;
             }
         }
-        bool initialLaser=false;
-        for(auto named=Member(laserEffects,"pulse_event").begin();named!=Member(laserEffects,"pulse_event").end();++named)
-            for(const auto& event:named.value())if(event.is_number_integer()&&GetPulse(event)==0)initialLaser=true;
         if(!initialLaser) {
             auto id=EffectType(nextEffect++);
             m_customAudioFilters[id]=MakeEffect(laserEffects,"peaking_filter",J::object());
