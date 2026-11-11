@@ -106,6 +106,8 @@ private:
     std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides, m_inactiveOverrides;
     std::map<EffectType, MapTime> m_filterCaptureTimes;
     MapTime m_lastCaptureTime = std::numeric_limits<MapTime>::min();
+    // USC_AUDIO_PROBE_PATCH_20261110: event-log throttle, not used unless enabled.
+    MapTime m_audioProbeLastLaserTime = std::numeric_limits<MapTime>::min();
     size_t m_automationCursor = 0;
     MapTime m_automationTime = std::numeric_limits<MapTime>::min();
 	// Returns the track that should have effects applied to them

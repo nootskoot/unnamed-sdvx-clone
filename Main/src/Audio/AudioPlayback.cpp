@@ -6,7 +6,21 @@
 #include <Audio/Audio.hpp>
 #include <Audio/DSP.hpp>
 #include <Beatmap/KSHFilter.hpp>
+#include <cstdlib>  // opt-in audio comparison environment switches
 #include <Shared/Profiling.hpp>
+// USC_AUDIO_PROBE_PATCH_20261110: default game audio is unchanged.
+// Set USC_AUDIO_PROBE=1 for structured event/gain logs.
+// Diagnostic-only: this probe does not alter DSP mixing or FX state.
+namespace {
+    bool USC_AudioEnvironmentSwitch(const char* name) {
+        const char* value = std::getenv(name);
+        return value && value[0] != '\0' && value[0] != '0';
+    }
+    bool USC_AudioProbe() {
+        static const bool enabled = USC_AudioEnvironmentSwitch("USC_AUDIO_PROBE");
+        return enabled;
+    }
+}
 
 AudioPlayback::AudioPlayback()
 {
@@ -28,6 +42,7 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
     m_automationCursor = 0;
     m_automationTimingTime = std::numeric_limits<MapTime>::min();
     m_lastCaptureTime = std::numeric_limits<MapTime>::min();
+    m_audioProbeLastLaserTime = std::numeric_limits<MapTime>::min();
     m_effectEnabled[0] = m_effectEnabled[1] = false;
     m_lastEnabledFXLane = 0;
     m_effectMix[0] = m_effectMix[1] = 0.0f;
@@ -111,6 +126,10 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 	{
 		m_singleF = !m_legacyP || !m_legacyFP;
         SetFXTrackState(false,false);
+        if (USC_AudioProbe())
+            Logf("[AUDIO-PROBE] ROUTE external_fxtrack=1 pfp=%d single_f=%d prerender_requested=%d",
+                Logger::Severity::Warning, int(bool(m_legacyP && m_legacyFP)),
+                int(m_singleF), int(preRender));
         // Prevent loading switchables if fx track is in use.
 		return true;
 	}
@@ -124,6 +143,9 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 	{
 		m_fxtrack = AudioStream::Clone(g_audio, m_music);
 		assert(m_fxtrack);
+        if (USC_AudioProbe())
+            Logf("[AUDIO-PROBE] ROUTE prerender_fx=1; real-time FX hold events bypassed",
+                Logger::Severity::Warning);
 		m_PreRenderDSPTrack();
 		return true;
 	}
@@ -160,6 +182,10 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 	}
 
 
+    if (USC_AudioProbe())
+        Logf("[AUDIO-PROBE] ROUTE realtime_fx=1 prerender_requested=%d named_filters=%d automation=%d",
+            Logger::Severity::Warning, int(preRender), int(hasNamedFilters),
+            int(!m_beatmap->GetAudioEffectChanges().empty()));
 	return true;
 }
 void AudioPlayback::Tick(float deltaTime)
@@ -377,6 +403,12 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 	DSP *&dsp = m_buttonDSPs[index];
 
 	m_buttonEffects[index] = m_ResolveEffect(object->effectType, false);
+    if (USC_AudioProbe()) {
+        Logf("[AUDIO-PROBE] FX_BEGIN t=%d lane=%u id=%u kind=%u dur=%d persistent=%d",
+            Logger::Severity::Warning, int(object->time), unsigned(index),
+            unsigned(uint16(object->effectType)), unsigned(uint16(m_buttonEffects[index].type)),
+            int(object->duration), int(m_buttonEffects[index].persistentFXCapture));
+    }
 
     if (m_buttonEffects[index].persistentFXCapture) {
         const auto bus=EffectType(m_buttonEffects[index].independentFXBus);
@@ -424,21 +456,41 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 }
 void AudioPlayback::SetEffectEnabled(uint32 index, bool enabled)
 {
-	assert(index <= 1);
+		assert(index <= 1);
+    const bool changed = enabled != m_effectEnabled[index];
     if (enabled && !m_effectEnabled[index]) m_lastEnabledFXLane=index;
 	m_effectEnabled[index] = enabled;
 	m_effectMix[index] = enabled ? m_buttonEffects[index].mix.Sample() : 0.0f;
-
+    if (USC_AudioProbe() && changed) {
+        Logf("[AUDIO-PROBE] FX_STATE t=%d lane=%u on=%d id=%u kind=%u mix=%.3f",
+            Logger::Severity::Warning, m_playback ? int(m_playback->GetLastTime()) : -1,
+            unsigned(index), int(enabled),
+            m_currentHoldEffects[index] ? unsigned(uint16(m_currentHoldEffects[index]->effectType)) : 0u,
+            unsigned(uint16(m_buttonEffects[index].type)), double(m_effectMix[index]));
+    }
 	if (m_buttonEffects[index].type == EffectType::SwitchAudio)
 	{
 		SetSwitchableTrackEnabled(m_buttonEffects[index].switchaudio.index.Sample(), enabled);
 		return;
 	}
-
 	if (m_buttonDSPs[index])
 	{
 		m_buttonDSPs[index]->mix = m_effectMix[index];
 	}
+    // ksmaudio's FX bus keeps one instance per *named* effect ID, not one per lane.
+    // This is only an experiment for the case where both lanes invoke the SAME ID.
+    const bool twoFlangers = m_effectEnabled[0] && m_effectEnabled[1] &&
+        m_currentHoldEffects[0] && m_currentHoldEffects[1] &&
+        m_buttonEffects[0].type == EffectType::Flanger &&
+        m_buttonEffects[1].type == EffectType::Flanger;
+    const bool sameId = twoFlangers &&
+        m_currentHoldEffects[0]->effectType == m_currentHoldEffects[1]->effectType;
+    if (USC_AudioProbe() && changed && twoFlangers) {
+        Logf("[AUDIO-PROBE] OVERLAP_FLANGER t=%d idL=%u idR=%u same_id=%d",
+            Logger::Severity::Warning, m_playback ? int(m_playback->GetLastTime()) : -1,
+            unsigned(uint16(m_currentHoldEffects[0]->effectType)),
+            unsigned(uint16(m_currentHoldEffects[1]->effectType)), int(sameId));
+    }
     m_UpdateIndependentFXMix();
 }
 void AudioPlayback::ClearEffect(uint32 index, HoldObjectState *object)
@@ -448,6 +500,8 @@ void AudioPlayback::ClearEffect(uint32 index, HoldObjectState *object)
 	{
 		m_CleanupDSP(m_buttonDSPs[index]);
 		m_currentHoldEffects[index] = nullptr;
+        if (USC_AudioProbe())
+            Logf("[AUDIO-PROBE] FX_END lane=%u", Logger::Severity::Warning, unsigned(index));
         m_UpdateIndependentFXMix();
 	}
 }
@@ -478,6 +532,17 @@ bool AudioPlayback::m_SkipEffectIfInputIsZero()
 }
 void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligibleLanes)
 {
+    if (USC_AudioProbe() && m_playback) {
+        const MapTime now = m_playback->GetLastTime();
+        if (m_audioProbeLastLaserTime == std::numeric_limits<MapTime>::min() ||
+            now < m_audioProbeLastLaserTime || now - m_audioProbeLastLaserTime >= 1000) {
+            m_audioProbeLastLaserTime = now;
+            Logf("[AUDIO-PROBE] LASER t=%d id=%u kind=%u input=%.3f active=%d eligible=%u gain=%.3f fxstem=%d",
+                Logger::Severity::Warning, int(now), unsigned(uint16(m_laserEffectType)),
+                unsigned(uint16(m_laserEffect.type)), double(input), int(active), eligibleLanes,
+                double(m_laserEffectMix), int(bool(m_fxtrack)));
+        }
+    }
     // P/FP already contain laser effects. Applying a live DSP would double them.
     if (m_legacyP && m_legacyFP) { m_laserInput=input; return; }
     if(m_laserEffect.type==EffectType::PeakingFilter && m_beatmap && m_playback &&
@@ -558,6 +623,10 @@ float AudioPlayback::GetLaserFilterInput() const
 }
 void AudioPlayback::SetLaserEffectMix(float mix)
 {
+    if (USC_AudioProbe() && (mix != m_laserEffectMix))
+        Logf("[AUDIO-PROBE] LASER_GAIN t=%d old=%.3f new=%.3f",
+            Logger::Severity::Warning, m_playback ? int(m_playback->GetLastTime()) : -1,
+            double(m_laserEffectMix), double(mix));
 	m_laserEffectMix = mix;
 }
 float AudioPlayback::GetLaserEffectMix() const
@@ -573,6 +642,10 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 	mix = Math::Clamp(mix, 0.0f, 1.0f);
 	const uint16 key = (uint16)type;
 	auto &state = m_namedLaserFilters[key];
+    if (USC_AudioProbe() && (mix != state.mix))
+        Logf("[AUDIO-PROBE] NAMED_FILTER t=%d id=%u old=%.3f new=%.3f",
+            Logger::Severity::Warning, int(m_playback->GetLastTime()), unsigned(key),
+            double(state.mix), double(mix));
 	state.mix = mix;
     const auto inactiveEffect = m_ResolveInactiveEffect(type);
     if (m_singleF && inactiveEffect.persistentFXCapture) return;
