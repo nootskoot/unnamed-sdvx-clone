@@ -370,7 +370,7 @@ Mesh LaserTrackBuilder::GenerateClippedTrackMesh(class BeatmapPlayback& playback
 
 Mesh LaserTrackBuilder::GenerateTrackEntry(class BeatmapPlayback& playback, LaserObjectState* laser)
 {
-	assert(laser->prev == nullptr);
+	// May follow a visually hidden out-of-range lead.
 	if(m_cachedEntries.Contains(laser))
 		return m_cachedEntries[laser];
 

@@ -807,17 +807,21 @@ float AudioPlayback::GetPlaybackSpeed() const
 }
 void AudioPlayback::SetVolume(float volume)
 {
+    m_musicVolume = volume;
     if (m_fxtrack) {
-        m_musicVolume=volume;
-        SetFXTrackState(m_legacyFXActive,m_legacyLaserActive);
+        SetFXTrackState(m_legacyFXActive, m_legacyLaserActive);
         return;
     }
-	m_music->SetVolume(volume);
-	if (m_fxtrack)
-		m_fxtrack->SetVolume(volume);
-	for (auto it = m_switchables.begin(); it != m_switchables.end(); ++it)
-		if (it->m_audio)
-			it->m_audio->SetVolume(volume);
+
+    // Preserve the currently selected SwitchAudio stream when the global volume
+    // changes. Muted streams must remain muted or their audio will stack.
+    const int32 activeSwitchable = m_enabledSwitchables.size()
+        ? m_enabledSwitchables.back() : -1;
+    m_music->SetVolume(activeSwitchable < 0 ? volume : 0.0f);
+    for (size_t i = 0; i < m_switchables.size(); ++i) {
+        if (m_switchables[i].m_audio)
+            m_switchables[i].m_audio->SetVolume(int32(i) == activeSwitchable ? volume : 0.0f);
+    }
 }
 void AudioPlayback::m_CleanupDSP(DSP *&ptr)
 {

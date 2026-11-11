@@ -445,6 +445,25 @@ void Track::Tick(class BeatmapPlayback& playback, float deltaTime)
 
 }
 
+// Draw-only workaround for initial, short extended-laser heads with out-of-range
+// coordinates (e.g. Arghena -1.0 -> 0.275 in one pulse). Keep the gameplay
+// laser chain untouched; skip only the visually invalid lead mesh.
+namespace {
+bool IsShortOutOfBoundsLaserLead(const LaserObjectState* laser)
+{
+    if (!laser || laser->prev || !laser->next ||
+        (laser->flags & LaserObjectState::flag_Extended) == 0 ||
+        (laser->flags & LaserObjectState::flag_Instant) != 0 ||
+        laser->duration > 5)
+        return false;
+    const float start = laser->points[0];
+    const float destination = laser->points[1];
+    return std::isfinite(start) && std::isfinite(destination) &&
+        (start < 0.0f || start > 1.0f) &&
+        destination >= 0.0f && destination <= 1.0f;
+}
+} // namespace
+
 void Track::DrawLaserBase(RenderQueue& rq, class BeatmapPlayback& playback, const Vector<ObjectState*>& objects)
 {
 	for (auto obj : objects)
@@ -453,6 +472,8 @@ void Track::DrawLaserBase(RenderQueue& rq, class BeatmapPlayback& playback, cons
 			continue;
 
 		LaserObjectState* laser = (LaserObjectState*)obj;
+		if (IsShortOutOfBoundsLaserLead(laser))
+			continue;
 		if ((laser->flags & LaserObjectState::flag_Extended) != 0 || m_trackHide > 0.f)
 		{
 			// Calculate height based on time on current track
@@ -752,6 +773,8 @@ void Track::DrawObjectState(RenderQueue& rq, class BeatmapPlayback& playback, Ob
 		position = playback.ObjectViewDistance(obj);
 		float posmult = trackLength / (m_viewRange * laserSpeedOffset);
 		LaserObjectState* laser = (LaserObjectState*)obj;
+		if (IsShortOutOfBoundsLaserLead(laser))
+			return;
 		const float laserOriginY = posmult * position;
 		const float laserMargin = trackLength * 0.25f;
 		const float laserClipMin = -laserMargin - laserOriginY;
@@ -797,7 +820,11 @@ void Track::DrawObjectState(RenderQueue& rq, class BeatmapPlayback& playback, Ob
 		};
 
 		// Draw entry?
-		if(!laser->prev && laserOriginY >= -laserMargin &&
+		// If a short invalid lead was hidden, draw the following legal
+		// segment as the visual entry (without changing chart links).
+		const bool visuallyFirst = !laser->prev ||
+			IsShortOutOfBoundsLaserLead(laser->prev);
+		if(visuallyFirst && laserOriginY >= -laserMargin &&
 			laserOriginY <= trackLength + laserMargin)
 		{
 			Mesh laserTail = m_laserTrackBuilder[laser->index]->GenerateTrackEntry(playback, laser);
