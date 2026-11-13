@@ -341,15 +341,43 @@ void TapeStopDSP::SetLength(double length)
 	double flength = length / 1000.0 * m_sampleRate;
 	if (m_length == (uint32)flength) return;
     m_length = (uint32)flength;
-    m_sampleIdx = 0; m_currentSample = 0;
-	m_sampleBuffer.clear();
+	m_Reset();
 	m_sampleBuffer.reserve(2 * m_length + 100);
+}
+void TapeStopDSP::SetKsmSpeed(float speed)
+{
+	assert(m_sampleRate > 0);
+	speed = Math::Clamp(speed, 0.0f, 1.0f);
+	if (m_ksmCurve && m_ksmSpeed == speed) return;
+	if (!m_ksmCurve) m_Reset();
+	m_ksmCurve = true;
+	m_ksmSpeed = speed;
+	// The per-frame decrement is at least scale * 0.5 / 500000, which bounds how long the buffer can grow.
+	const float scale = speed * 100.0f + 1.0f;
+	const size_t maxFrames = (size_t)(1.0e6f / scale) + 100;
+	m_sampleBuffer.reserve(2 * maxFrames);
+}
+void TapeStopDSP::m_Reset()
+{
+	m_sampleIdx = 0.0;
+	m_currentSample = 0;
+	m_playSpeed = 1.0f;
+	m_ksmFrames = 0;
+	m_sampleBuffer.clear();
 }
 void TapeStopDSP::Process(float *out, uint32 numSamples)
 {
-    if (!m_length) return;
+	if (!m_ksmCurve && !m_length) return;
+	if (!trigger)
+	{
+		// Untriggered: transparent, and the slowdown restarts from full speed on the next trigger.
+		if (m_currentSample != 0 || m_sampleIdx != 0.0 || m_ksmFrames != 0)
+			m_Reset();
+		return;
+	}
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
+	const float sampleRateScale = (float)m_sampleRate / 44100.0f;
 
 	for (uint32 i = 0; i < numSamples; i++)
 	{
@@ -357,26 +385,46 @@ void TapeStopDSP::Process(float *out, uint32 numSamples)
 		{
 			continue;
 		}
-		float sampleRate = 1.0f - (float)m_currentSample / (float)m_length;
-		if (sampleRate == 0.0f)
+		const float dryL = out[i * 2];
+		const float dryR = out[i * 2 + 1];
+
+		float playSpeed;
+		if (m_ksmCurve)
 		{
-			// Mute
-			out[i * 2] = 0.0f;
-			out[i * 2 + 1] = 0.0f;
-			continue;
+			// ksmaudio TapestopDSP: the speed falls by a per-frame amount that eases off over time
+			const float scale = Math::Max(m_ksmSpeed * 100.0f, 0.0f) + 1.0f;
+			const float rate = powf(2.5f, -(float)m_ksmFrames / 8000.0f / sampleRateScale) + 0.5f;
+			m_playSpeed = Math::Max(m_playSpeed - scale * rate / 500000.0f, 0.0f);
+			m_ksmFrames++;
+			playSpeed = m_playSpeed;
 		}
-		// Store samples for later
-		m_sampleBuffer.Add(out[i * 2]);
-		m_sampleBuffer.Add(out[i * 2 + 1]);
+		else
+		{
+			playSpeed = m_currentSample < m_length ? 1.0f - (float)m_currentSample / (float)m_length : 0.0f;
+		}
 
-		// The sample index into the buffer
-		uint32 i2 = (uint32)floor(m_sampleIdx);
-		out[i * 2] = m_sampleBuffer[i2 * 2] * mix + out[i * 2] * (1 - mix);
-		out[i * 2 + 1] = m_sampleBuffer[i2 * 2 + 1] * mix + out[i * 2 + 1] * (1 - mix);
+		float wetL = 0.0f;
+		float wetR = 0.0f;
+		if (playSpeed > 0.0f)
+		{
+			// Store samples for later
+			m_sampleBuffer.Add(dryL);
+			m_sampleBuffer.Add(dryR);
 
-		// Increase index
-		m_sampleIdx += sampleRate;
-		m_currentSample++;
+			// The sample index into the buffer (never ahead of what has been written)
+			const uint32 i2 = Math::Min((uint32)floor(m_sampleIdx), (uint32)(m_sampleBuffer.size() / 2 - 1));
+			// Like KSM, fade only the wet signal out over the last quarter of the slowdown.
+			const float fade = playSpeed < 0.25f ? playSpeed * 4.0f : 1.0f;
+			wetL = m_sampleBuffer[i2 * 2] * fade;
+			wetR = m_sampleBuffer[i2 * 2 + 1] * fade;
+
+			// Increase index
+			m_sampleIdx += playSpeed;
+			m_currentSample++;
+		}
+		// Once the tape has stopped only the wet part is silent; the dry part stays at (1 - mix).
+		out[i * 2] = wetL * mix + dryL * (1.0f - mix);
+		out[i * 2 + 1] = wetR * mix + dryR * (1.0f - mix);
 	}
 }
 

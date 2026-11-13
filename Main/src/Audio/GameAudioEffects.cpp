@@ -80,7 +80,10 @@ DSP *GameAudioEffect::CreateDSP(const TimingPoint &tp, float filterInput, uint32
 	case EffectType::TapeStop:
 	{
 		TapeStopDSP *tapestopDSP = new TapeStopDSP(sampleRate);
-		tapestopDSP->SetLength(actualLength);
+		if (tapestopKsmCurve)
+			tapestopDSP->SetKsmSpeed(tapestopSpeed.Sample(filterInput));
+		else
+			tapestopDSP->SetLength(actualLength);
 		ret = tapestopDSP;
 		break;
 	}
@@ -225,7 +228,10 @@ bool GameAudioEffect::UpdateDSP(DSP* dsp, const TimingPoint &tp, float filterInp
 	case EffectType::TapeStop:
 	{
 		TapeStopDSP *tapestopDSP = static_cast<TapeStopDSP*>(dsp);
-		tapestopDSP->SetLength(actualLength);
+		if (tapestopKsmCurve)
+			tapestopDSP->SetKsmSpeed(tapestopSpeed.Sample(filterInput));
+		else
+			tapestopDSP->SetLength(actualLength);
 		ret = tapestopDSP;
 		break;
 	}

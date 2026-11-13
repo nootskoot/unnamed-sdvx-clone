@@ -195,6 +195,7 @@ void AudioPlayback::Tick(float deltaTime)
         if (time < m_lastCaptureTime) {
             m_filterCaptureTimes.clear();
             std::map<EffectType, float> mixes;
+            std::map<uint16, uint8> triggers;
             for (const auto& o : m_beatmap->GetObjectStates()) {
                 if (o->time > time) break;
                 if (o->type != ObjectType::Event) continue;
@@ -203,7 +204,10 @@ void AudioPlayback::Tick(float deltaTime)
                     m_filterCaptureTimes[EffectType(uint16(e->data.uintVal))] = e->time;
                 if (e->key == EventKey::NamedLaserFilterMix)
                     mixes[EffectType(uint16(e->data.uintVal >> 16))] = (e->data.uintVal & 0xffff) / 1000.f;
+                if (e->key == EventKey::NamedLaserFilterTrigger)
+                    triggers[uint16(e->data.uintVal >> 16)] = uint8(e->data.uintVal & 7);
             }
+            m_namedFilterTriggers = triggers;
             m_CleanupDSP(m_laserDSP);
             for (auto& entry : m_namedLaserFilters) m_CleanupDSP(entry.second.dsp);
             m_namedLaserFilters.clear();
@@ -268,6 +272,7 @@ void AudioPlayback::m_UpdateAutomation(MapTime time)
                 params.effectType = EffectType::UserDefined0; // -1 means no explicit override
             }
             m_buttonEffects[lane].SetParams(m_buttonDSPs[lane], *this, &params);
+            m_ApplyButtonTrigger(lane);
         }
         SetEffectEnabled(lane, enabled);
     }
@@ -440,6 +445,7 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
 		params.effectType = EffectType::UserDefined0;
 	}
 	m_buttonEffects[index].SetParams(dsp, *this, &params);
+	m_ApplyButtonTrigger(index);
 
 	// Initialize mix value to previous value
 	dsp->mix = m_effectMix[index];
@@ -545,6 +551,9 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
     }
     // P/FP already contain laser effects. Applying a live DSP would double them.
     if (m_legacyP && m_legacyFP) { m_laserInput=input; return; }
+    m_namedTriggerLaserActive = active;
+    m_namedTriggerLaserInput = input;
+    m_ApplyNamedFilterTriggers();
     if(m_laserEffect.type==EffectType::PeakingFilter && m_beatmap && m_playback &&
        m_beatmap->GetMapSettings().peakingFilterDelay>0 && (!m_fxtrack || m_singleF)) {
         active=m_laserAudioSampler.Sample(double(m_playback->GetLastTime())-
@@ -557,6 +566,7 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
         effect.UpdateDSP(independent->second.dsp,m_playback->GetCurrentTimingPoint(),active?input:0.f,m_GetDSPTrack()->GetAudioSampleRate(),GetPlaybackSpeed());
         independent->second.dsp->mix=active?effect.mix.Sample(input):independent->second.mix;
         m_MirrorLaserDSP(independent->second.dsp,effect,active?input:0.f,false);
+        m_ApplyNamedFilterTriggers();
         m_laserInput=input; return;
     }
 	if (m_laserEffect.type != EffectType::None && (active && (input != 0.0f || !m_SkipEffectIfInputIsZero())))
@@ -605,6 +615,7 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
 		m_SetLaserEffectParameter(input, m_laserDSP);
 		m_laserDSP->mix = Math::Clamp(m_laserDSP->mix, 0.f, 1.f);
         m_MirrorLaserDSP(m_laserDSP,m_laserEffect,input,true);
+        m_ApplyNamedFilterTriggers();
 		m_laserInput = input;
 	}
 	else
@@ -669,7 +680,42 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 	m_ConfigureGateClock(state.dsp, state.effect);
 	track->AddDSP(state.dsp);
     m_MirrorLaserDSP(state.dsp,state.effect,1.f,false);
+    m_ApplyNamedFilterTriggers();
     m_UpdateIndependentFXMix();
+}
+void AudioPlayback::SetNamedLaserFilterTrigger(EffectType type, uint8 bits)
+{
+    m_namedFilterTriggers[uint16(type)] = bits & 7;
+    m_ApplyNamedFilterTriggers();
+}
+// KSM evaluates a filter's `trigger` switch as Off>OnMin-OnMax: the off value while the filter is not
+// the held laser filter, otherwise a lerp between the on values by laser position.
+void AudioPlayback::m_ApplyNamedFilterTriggers()
+{
+    const auto bitsFor = [&](uint16 type, const AudioEffect& effect) {
+        const auto it = m_namedFilterTriggers.find(type); // `filter:X:trigger` automation wins over the definition
+        return it != m_namedFilterTriggers.end() ? it->second : effect.triggerBits;
+    };
+    const auto set = [&](DSP* dsp, bool value) {
+        dsp->trigger = value;
+        const auto mirror = m_legacyDryDSPs.find(dsp);
+        if (mirror != m_legacyDryDSPs.end()) mirror->second->trigger = value;
+    };
+    for (auto& entry : m_namedLaserFilters) {
+        auto& state = entry.second;
+        if (!state.dsp || state.effect.type != EffectType::TapeStop) continue;
+        const bool isOn = entry.first == uint16(m_laserEffectType) && m_namedTriggerLaserActive;
+        set(state.dsp, EvaluateSwitchBits(bitsFor(entry.first, state.effect), isOn, m_namedTriggerLaserInput));
+    }
+    // A plain laser filter DSP only exists while its laser is held.
+    if (m_laserDSP && m_laserEffect.type == EffectType::TapeStop)
+        set(m_laserDSP, EvaluateSwitchBits(bitsFor(uint16(m_laserEffectType), m_laserEffect), true, m_namedTriggerLaserInput));
+}
+// FX hold: KSM evaluates the switch with the lane held and a laser value of 0.
+void AudioPlayback::m_ApplyButtonTrigger(uint32 lane)
+{
+    if (!m_buttonDSPs[lane] || m_buttonEffects[lane].type != EffectType::TapeStop) return;
+    m_buttonDSPs[lane]->trigger = EvaluateSwitchBits(m_buttonEffects[lane].triggerBits, true, 0.0f);
 }
 void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
 {
@@ -856,6 +902,7 @@ void AudioPlayback::m_MirrorLaserDSP(DSP* original, GameAudioEffect effect, floa
     if (ordinary) m_SetLaserEffectParameter(input,mirror);
     else effect.UpdateDSP(mirror,m_playback->GetCurrentTimingPoint(),input,m_music->GetAudioSampleRate(),GetPlaybackSpeed());
     mirror->mix=original->mix;
+    mirror->trigger=original->trigger;
 }
 void AudioPlayback::m_SetLaserEffectParameter(float input, DSP* dsp)
 {

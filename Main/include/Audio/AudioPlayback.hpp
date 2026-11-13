@@ -77,6 +77,8 @@ public:
 	// Independent named laser filter automation (not the normal laser filter).
 	void SetNamedLaserFilterMix(EffectType type, float mix);
 	void RefreshNamedLaserFilter(EffectType type);
+	// KSM `trigger` switch of a named filter: bit0 = off value, bit1 = on(min), bit2 = on(max). Default off>on.
+	void SetNamedLaserFilterTrigger(EffectType type, uint8 bits);
 
 	// Toggle FX track or normal track
 	// this is just to support maps that do actually have an FX track
@@ -152,6 +154,11 @@ private:
 		float mix = 0.0f;
 	};
 	std::map<uint16, NamedLaserFilterState> m_namedLaserFilters;
+	std::map<uint16, uint8> m_namedFilterTriggers; // survives m_namedLaserFilters.clear(); absent = off>on
+	bool m_namedTriggerLaserActive = false;
+	float m_namedTriggerLaserInput = 0.0f;
+	void m_ApplyNamedFilterTriggers();
+	void m_ApplyButtonTrigger(uint32 lane);
 
 	GameAudioEffect m_buttonEffects[2];
 	class DSP *m_buttonDSPs[2] = {nullptr};

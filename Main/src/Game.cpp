@@ -2452,6 +2452,10 @@ public:
 			const EffectType type = (EffectType)(uint16)(data.uintVal >> 16);
 			m_audioPlayback.SetNamedLaserFilterMix(type, (float)(data.uintVal & 0xFFFF) / 1000.0f);
 		}
+		else if (key == EventKey::NamedLaserFilterTrigger)
+		{
+			m_audioPlayback.SetNamedLaserFilterTrigger((EffectType)(uint16)(data.uintVal >> 16), (uint8)(data.uintVal & 7));
+		}
 		else if (key == EventKey::NamedLaserFilterRefresh)
 		{
 			if (data.uintVal)

@@ -149,17 +149,26 @@ class TapeStopDSP : public DSP
 public:
 	TapeStopDSP(uint32 sampleRate);
 
+	// Legacy: linear slowdown to a stop over <length> milliseconds
 	void SetLength(double length);
+	// KSM: slowdown curve of KSM's `speed` parameter (0-1; higher stops faster). Takes precedence over SetLength.
+	void SetKsmSpeed(float speed);
 
 	virtual void Process(float *out, uint32 numSamples);
 	[[nodiscard]]
 	virtual const char *GetName() const { return "TapeStopDSP"; }
 
 private:
+	void m_Reset();
+
 	uint32 m_length = 0;
 	Vector<float> m_sampleBuffer;
-	float m_sampleIdx = 0.0f;
+	double m_sampleIdx = 0.0; // double: a float stops advancing once the index gets large
 	uint32 m_currentSample = 0;
+	bool m_ksmCurve = false;
+	float m_ksmSpeed = 0.5f;
+	float m_playSpeed = 1.0f;
+	uint32 m_ksmFrames = 0;
 };
 
 class RetriggerDSP : public DSP

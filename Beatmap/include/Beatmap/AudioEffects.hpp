@@ -146,6 +146,14 @@ struct AudioEffect
 	// How much of the effect is mixed in with the source audio
 	EffectParam<float> mix = 0.0f;
 
+	// KSM `trigger` switch ("Off>OnMin-OnMax"): bit0 = off value, bit1 = onMin, bit2 = onMax.
+	// Default is KSM's "off>on". Only TapeStop consumes it.
+	uint8 triggerBits = 6;
+	// TapeStop only: KSM-style speed rate (0-1) when the definition gives `speed` as a percentage.
+	// Selects KSM's slowdown curve instead of the legacy linear stop over `duration`.
+	bool tapestopKsmCurve = false;
+	EffectParam<float> tapestopSpeed = 0.5f;
+
     // KSH granular pitch controls; zero chunk selects the native SoundTouch path.
     uint16 independentFXBus = 0;
     bool persistentFXCapture = false; // KSH named retrigger: one capture across FX holds
@@ -275,3 +283,24 @@ struct AudioEffect
 		} switchaudio;
 	};
 };
+
+// Parses a KSM switch value ("on", "off>on", "on>off-on", ...) into bits: bit0 = off, bit1 = onMin, bit2 = onMax.
+// Mirrors ksmaudio's StrToValueSet(Type::kSwitch): only the literal "on" is true.
+inline uint8 ParseSwitchBits(const char* str, size_t len)
+{
+	const std::string s(str, len);
+	const size_t gt = s.find('>');
+	const size_t dash = s.find('-', (gt == std::string::npos ? 0 : gt + 1) + 1);
+	const std::string off = gt == std::string::npos ? (dash == std::string::npos ? s : s.substr(0, dash)) : s.substr(0, gt);
+	const std::string onMin = gt == std::string::npos ? off : (dash == std::string::npos ? s.substr(gt + 1) : s.substr(gt + 1, dash - gt - 1));
+	const std::string onMax = dash == std::string::npos ? onMin : s.substr(dash + 1);
+	return (uint8)((off == "on" ? 1 : 0) | (onMin == "on" ? 2 : 0) | (onMax == "on" ? 4 : 0));
+}
+
+// Value of a KSM switch: the off value when inactive, else onMin..onMax by laser position (0 for FX holds).
+inline bool EvaluateSwitchBits(uint8 bits, bool isOn, float laserValue)
+{
+	if (!isOn) return (bits & 1) != 0;
+	const float onMin = (bits & 2) ? 1.0f : 0.0f, onMax = (bits & 4) ? 1.0f : 0.0f;
+	return onMin + (onMax - onMin) * laserValue >= 0.5f;
+}

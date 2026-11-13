@@ -68,6 +68,7 @@ enum class EventKey : uint8
 	ChartEnd,	NamedLaserFilterMix,     // packed: EffectType + mix in per-mille
 	NamedLaserFilterRefresh, // EffectType: retrigger refresh
 	LaserSlamSound,          // uint8: 0=up, 1=down, 2=swing, 3=mute
+	NamedLaserFilterTrigger, // packed: EffectType + KSM switch bits (bit0=off, bit1=onMin, bit2=onMax)
 
 };
 

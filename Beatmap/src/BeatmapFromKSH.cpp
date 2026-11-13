@@ -239,8 +239,15 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 	bool typeSet = false;
 
 	Map<String, MultiParamRange> params;
+	uint8 triggerBits = 6; // KSM default "off>on"
 	for (const auto& s : def.parameters)
 	{
+		if (s.first == "trigger")
+		{
+			// Switch, not a numeric parameter; applied after the type default is loaded below.
+			triggerBits = ParseSwitchBits(s.second.data(), s.second.size());
+			continue;
+		}
 		// This one is easy
 		if (s.first == "type")
 		{
@@ -345,6 +352,7 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 	};
 
 	AssignFloatIfSet(effect.mix, "mix");
+	effect.triggerBits = triggerBits;
 
 	// Set individual parameters per effect based on if they are specified or not
 	// if they are not set the defaults will be kept (as aquired above)
@@ -407,6 +415,15 @@ AudioEffect ParseCustomEffect(const KShootEffectDefinition &def, Vector<String> 
 		break;
 	case EffectType::TapeStop:
 		AssignDurationIfSet(effect.duration, "speed");
+		{
+			// KSM's `speed` is a percentage rate, not a length. Honor it with KSM's slowdown curve.
+			const auto raw = def.parameters.find("speed");
+			if (raw != def.parameters.end() && raw->second.find('%') != String::npos)
+			{
+				AssignFloatIfSet(effect.tapestopSpeed, "speed");
+				effect.tapestopKsmCurve = true;
+			}
+		}
 		break;
     case EffectType::PeakingFilter:
         AssignFloatIfSet(effect.peaking.freq, "freq");
@@ -542,6 +559,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 
     auto InactiveFX = [&](KShootEffectDefinition definition) {
         for (auto& parameter : definition.parameters) {
+            if (parameter.first=="trigger") continue; // switch keeps its full Off>OnMin-OnMax form
             const auto arrow=parameter.second.find('>',1);
             if (arrow!=String::npos) parameter.second=parameter.second.substr(0,arrow);
         }
@@ -1023,7 +1041,7 @@ const static int tickResolution = 240;
             // Definition snapshots keep chart-time automation separate from immutable base effects.
             else if (p.first.find("fx:") == 0 ||
                 (p.first.find("filter:") == 0 && p.first.find(":mix") == String::npos &&
-                 p.first.find(":updateTrigger") == String::npos))
+                 p.first.find(":updateTrigger") == String::npos && p.first.find(":trigger") == String::npos))
             {
                 const bool filter = p.first.find("filter:") == 0;
                 String name, property;
@@ -1034,10 +1052,10 @@ const static int tickResolution = 240;
                     static const Vector<String> supported = {"mix", "waveLength", "rate", "updatePeriod",
                         "period", "pitch", "amount", "reduction", "feedbackLevel", "stage", "loFreq", "hiFreq",
                         "chunkSize", "overWrap", "Q", "feedback", "stereoWidth", "hiCutGain", "depth", "delay", "volume", "attackTime",
-                        "holdTime", "releaseTime", "ratio", "speed", "freq", "gain", "pan"};
+                        "holdTime", "releaseTime", "ratio", "speed", "freq", "gain", "pan", "trigger"};
                     if (!filter && id && property == "updateTrigger" &&
                         m_customAudioEffects.Contains(*id) && m_customAudioEffects.at(*id).persistentFXCapture) {
-                        if (p.second == "on") {
+                        if (ParseSwitchBits(p.second.data(), p.second.size()) & 1) {
                             auto* event = new EventObjectState();
                             event->time = mapTime;
                             event->interTickIndex = tickSettingIndex;
@@ -1074,12 +1092,19 @@ const static int tickResolution = 240;
 				{
 					const EffectType *type = filterTypeMap.FindEffectType(name);
 					if (type && m_customAudioFilters.Contains(*type) &&
-						(property == "mix" || property == "updateTrigger"))
+						(property == "mix" || property == "updateTrigger" || property == "trigger"))
 					{
 						EventObjectState *evt = new EventObjectState();
 						evt->interTickIndex = tickSettingIndex;
 						evt->time = mapTime;
-						if (property == "mix")
+						if (property == "trigger")
+						{
+							// KSM switch syntax "Off>OnMin-OnMax" (see ParseSwitchBits).
+							const uint32 bits = ParseSwitchBits(p.second.data(), p.second.size());
+							evt->key = EventKey::NamedLaserFilterTrigger;
+							evt->data.uintVal = ((uint32)(uint16)*type << 16) | bits;
+						}
+						else if (property == "mix")
 						{
 							// Input is a percentage, e.g. 90% or 0%.
 							float percentage = (float)atof(p.second.data());
@@ -1087,12 +1112,25 @@ const static int tickResolution = 240;
 							const uint32 permille = (uint32)(percentage * 10.0f + 0.5f);
 							evt->key = EventKey::NamedLaserFilterMix;
 							evt->data.uintVal = ((uint32)(uint16)*type << 16) | permille;
+							// The event above is the filter's *off* mix. The on-state ("on" part of Off>OnMin-OnMax,
+							// laser-scaled for a-b) lives in the filter definition, so automate that as well.
+							auto& definition = automatedFilters[name];
+							if (definition.parameters.empty()) {
+								definition.typeName = name;
+								definition.parameters["type"] = name;
+							}
+							definition.parameters["mix"] = p.second;
+							const auto onEffect = ParseCustomEffect(definition, m_switchablePaths);
+							if (onEffect.type != EffectType::None && onEffect.type != EffectType::SwitchAudio)
+								m_audioEffectChanges.Add({mapTime, *type, true, onEffect});
 						}
 						else
 						{
 							evt->key = EventKey::NamedLaserFilterRefresh;
 							// 'on' is a one-shot repeat-source refresh, not a persistent toggle.
-							evt->data.uintVal = p.second == "on" ? (uint32)(uint16)*type : 0;
+							// KSM precomputes a one-shot trigger whenever the *off* value is "on" ("on", "on>off", "on-off"...);
+							// "off>on" is just the default behavior of starting with the laser and needs no event.
+							evt->data.uintVal = (ParseSwitchBits(p.second.data(), p.second.size()) & 1) ? (uint32)(uint16)*type : 0;
 						}
 						m_objectStates.emplace_back(std::unique_ptr<ObjectState>(*evt));
 					}
