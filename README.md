@@ -13,7 +13,7 @@ All changes from drewols' original are written using AI, and more so with a free
 This fork attempts to get USC in a much better state in terms of KSH compatibility. Adding KSH v2 as well as kson support works "well"
 
 
-(done also partially because because it seems very clear kson-rs will be ready to replace usc)
+(done also partially because because it seems very clear kson-rs will not be ready to replace usc for a while)
 
 ### [**FAQ**](https://github.com/Drewol/unnamed-sdvx-clone/wiki/F.-A.-Q.)
 
