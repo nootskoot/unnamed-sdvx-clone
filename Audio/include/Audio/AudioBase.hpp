@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 /*
 	Base class for Digital Signal Processors
 */
@@ -36,7 +38,7 @@ public:
 	float mix = 1.0f;
 	// Switch consumed by effects that have an on/off state (TapeStop). While false the
 	// effect is transparent and resets, as in KSM's `trigger` parameter.
-	bool trigger = true;
+	std::atomic<bool> trigger{true};
 	uint32 priority = 0;
 	uint32 startTime = 0;
 	uint32 endTime = 0;

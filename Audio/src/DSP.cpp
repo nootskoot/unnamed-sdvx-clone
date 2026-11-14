@@ -338,9 +338,14 @@ TapeStopDSP::TapeStopDSP(uint32 sampleRate) : DSP()
 void TapeStopDSP::SetLength(double length)
 {
 	assert(m_sampleRate > 0);
-	double flength = length / 1000.0 * m_sampleRate;
-	if (m_length == (uint32)flength) return;
-    m_length = (uint32)flength;
+	std::lock_guard<std::mutex> guard(m_stateLock);
+	const uint32 newLength = (uint32)(length / 1000.0 * m_sampleRate);
+	// This is the legacy (linear) mode. If the DSP was in KSM-curve mode, an explicit length has to
+	// switch it back, otherwise Process() keeps using the curve and silently ignores this value.
+	const bool leavingKsmCurve = m_ksmCurve;
+	if (!leavingKsmCurve && m_length == newLength) return;
+	m_ksmCurve = false;
+	m_length = newLength;
 	m_Reset();
 	m_sampleBuffer.reserve(2 * m_length + 100);
 }
@@ -348,6 +353,7 @@ void TapeStopDSP::SetKsmSpeed(float speed)
 {
 	assert(m_sampleRate > 0);
 	speed = Math::Clamp(speed, 0.0f, 1.0f);
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	if (m_ksmCurve && m_ksmSpeed == speed) return;
 	if (!m_ksmCurve) m_Reset();
 	m_ksmCurve = true;
@@ -367,6 +373,8 @@ void TapeStopDSP::m_Reset()
 }
 void TapeStopDSP::Process(float *out, uint32 numSamples)
 {
+	// Audio thread. Setters on the game thread clear/reserve m_sampleBuffer, so hold the state lock.
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	if (!m_ksmCurve && !m_length) return;
 	if (!trigger)
 	{
@@ -411,12 +419,18 @@ void TapeStopDSP::Process(float *out, uint32 numSamples)
 			m_sampleBuffer.Add(dryL);
 			m_sampleBuffer.Add(dryR);
 
-			// The sample index into the buffer (never ahead of what has been written)
-			const uint32 i2 = Math::Min((uint32)floor(m_sampleIdx), (uint32)(m_sampleBuffer.size() / 2 - 1));
+			// Read position into the buffer (never ahead of what has been written). The position is
+			// fractional while the tape is slowing down, so interpolate between neighbouring frames
+			// like ksmaudio (TimeModulator uses lerpedDelay) instead of repeating whole samples.
+			const uint32 lastFrame = (uint32)(m_sampleBuffer.size() / 2 - 1);
+			const double readPos = Math::Min(m_sampleIdx, (double)lastFrame);
+			const uint32 i0 = (uint32)floor(readPos);
+			const uint32 i1 = Math::Min(i0 + 1, lastFrame);
+			const float frac = (float)(readPos - (double)i0);
 			// Like KSM, fade only the wet signal out over the last quarter of the slowdown.
 			const float fade = playSpeed < 0.25f ? playSpeed * 4.0f : 1.0f;
-			wetL = m_sampleBuffer[i2 * 2] * fade;
-			wetR = m_sampleBuffer[i2 * 2 + 1] * fade;
+			wetL = (m_sampleBuffer[i0 * 2] + (m_sampleBuffer[i1 * 2] - m_sampleBuffer[i0 * 2]) * frac) * fade;
+			wetR = (m_sampleBuffer[i0 * 2 + 1] + (m_sampleBuffer[i1 * 2 + 1] - m_sampleBuffer[i0 * 2 + 1]) * frac) * fade;
 
 			// Increase index
 			m_sampleIdx += playSpeed;

@@ -2,6 +2,8 @@
 	This file contains DSP's that can be applied to audio samples of streams to modify the output
 */
 #pragma once
+
+#include <mutex>
 #include "AudioBase.hpp"
 #include <vector>
 #include <Shared/Interpolation.hpp>
@@ -159,7 +161,13 @@ public:
 	virtual const char *GetName() const { return "TapeStopDSP"; }
 
 private:
+	// Clears playback state. Callers must hold m_stateLock.
 	void m_Reset();
+
+	// Guards everything below. Process() runs on the audio thread while SetLength/SetKsmSpeed are
+	// called from the game thread and both clear/reserve m_sampleBuffer. Only ever held by this
+	// DSP's own methods, so it cannot deadlock against the Audio lock or AddDSP/RemoveDSP.
+	std::mutex m_stateLock;
 
 	uint32 m_length = 0;
 	Vector<float> m_sampleBuffer;

@@ -905,7 +905,7 @@ void AudioPlayback::m_MirrorLaserDSP(DSP* original, GameAudioEffect effect, floa
     if (ordinary) m_SetLaserEffectParameter(input,mirror);
     else effect.UpdateDSP(mirror,m_playback->GetCurrentTimingPoint(),input,m_music->GetAudioSampleRate(),GetPlaybackSpeed());
     mirror->mix=original->mix;
-    mirror->trigger=original->trigger;
+    mirror->trigger=original->trigger.load();
 }
 void AudioPlayback::m_SetLaserEffectParameter(float input, DSP* dsp)
 {

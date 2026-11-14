@@ -345,7 +345,18 @@ void GameAudioEffect::SetParams(DSP *dsp, AudioPlayback &playback, HoldObjectSta
 	case EffectType::TapeStop:
 	{
 		TapeStopDSP *tapestopDSP = (TapeStopDSP *)dsp;
-		if (object->effectParams[0] > 0) tapestopDSP->SetLength((1000 * ((double)16 / object->effectParams[0])));
+		if (tapestopKsmCurve)
+		{
+			// KSM-curve effects take the explicit KSH argument as the TapeStop `speed` percentage
+			// (fx-l=TapeStop;50 -> 50%; libkson's KSH importer maps it to speed="50%"). Calling SetLength
+			// here would be ignored by the curve (and used to be). Unset arguments are -1.
+			if (object->effectParams[0] >= 0) tapestopDSP->SetKsmSpeed(object->effectParams[0] / 100.0f);
+		}
+		else if (object->effectParams[0] > 0)
+		{
+			// Legacy USC TapeStop: the argument sets the length of the linear slowdown
+			tapestopDSP->SetLength((1000 * ((double)16 / object->effectParams[0])));
+		}
 		break;
 	}
 	case EffectType::Retrigger:
