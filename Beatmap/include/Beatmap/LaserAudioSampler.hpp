@@ -18,6 +18,9 @@ public:
             if(laser->index>1 || time.second<=time.first) continue;
             float a=laser->points[0],b=laser->points[1];
             if(laser->flags & LaserObjectState::flag_Extended) { a=(a+.5f)*.5f; b=(b+.5f)*.5f; }
+            // KSM treats a slam as an instant jump to its end value. USC keeps the slam's real length (up to 1/32 note),
+            // which would sweep the filter through every value in between and can add a few dB on the way.
+            if(laser->flags & LaserObjectState::flag_Instant) a=b;
             double tailStart=time.second;
             // KSM (v1 charts only): the last segment of a section gets no audio effect when it is <= 1/32 note and
             // no slam is involved (a slam at the end, or one starting the segment, exempts the section).
