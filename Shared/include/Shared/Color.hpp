@@ -35,6 +35,9 @@ public:
 	// Constructor with alpha=1
 	Color(float r, float g, float b);
 	Color(const VectorMath::VectorBase<uint8, 4>& icolor);
+	// Explicit float-vector conversion. Without this, GCC/Clang route (Color)(vec4) through the
+	// uint8 constructor above (truncating 0..1 floats to 0 and dividing by 255), giving black.
+	explicit Color(const Vector4& v) : Vector4(v) {}
 	bool operator ==(const Color& other) const;
 	bool operator !=(const Color& other) const;
 	[[nodiscard]]
