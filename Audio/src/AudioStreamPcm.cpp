@@ -45,8 +45,6 @@ int32 AudioStreamPcm::DecodeData_Internal()
         }
         else if ((uint64)m_playPos >= m_samplesTotal)
         {
-            m_currentBufferSize = m_bufferSize;
-            m_remainingBufferData = m_bufferSize;
             m_readBuffer[0][i] = 0;
             m_readBuffer[1][i] = 0;
             if (!earlyOut)
@@ -60,8 +58,10 @@ int32 AudioStreamPcm::DecodeData_Internal()
         m_readBuffer[1][i] = m_pcm[m_playPos * 2 + 1];
         m_playPos++;
     }
-    m_currentBufferSize = samplesPerRead;
-    m_remainingBufferData = samplesPerRead;
+    // Only the samples actually written above are valid. Leaving the count at
+    // samplesPerRead made the mixer replay the stale tail of the previous block.
+    m_currentBufferSize = retVal;
+    m_remainingBufferData = retVal;
     return retVal;
 }
 
@@ -105,7 +105,8 @@ AudioStreamPcm::~AudioStreamPcm()
     Deregister();
     if (m_pcm)
     {
-        delete m_pcm;
+        delete[] m_pcm;
+        m_pcm = nullptr;
     }
 }
 

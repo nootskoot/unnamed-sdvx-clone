@@ -72,6 +72,7 @@ public:
 		KShootMap& m_map;
 		KShootBlock* m_currentBlock;
 		KShootTime m_time;
+		void SeekBlock();
 	};
 
 public:

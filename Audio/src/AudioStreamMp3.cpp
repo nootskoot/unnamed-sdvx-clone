@@ -26,7 +26,11 @@ int AudioStreamMp3::m_toLittleEndian(int num)
 AudioStreamMp3::~AudioStreamMp3()
 {
 	Deregister();
-	mp3_done(m_decoder);
+	if (m_decoder)
+	{
+		mp3_done(m_decoder);
+		m_decoder = nullptr;
+	}
 
 	for (size_t i = 0; i < m_numChannels; i++)
 	{
@@ -72,8 +76,8 @@ bool AudioStreamMp3::Init(Audio *audio, const String &path, bool preload)
 	{
 		if (m_dataSource[i] == 0xFF)
 		{
-			if (i + 1 > m_mp3dataLength)
-				continue;
+			if (i + 1 >= m_mp3dataLength)
+				break;
 			if ((m_dataSource[i + 1] & 0xE0) == 0xE0) // Frame Sync
 			{
 				uint8 version = (m_dataSource[i + 1] & 0x18) >> 3;
@@ -83,9 +87,8 @@ bool AudioStreamMp3::Init(Audio *audio, const String &path, bool preload)
 				uint8 rateIndex = (m_dataSource[i + 2] & 0x0C) >> 2;
 				bool paddingEnabled = ((m_dataSource[i + 2] & 0x02) >> 1) != 0;
 				uint8 channelFlags = ((m_dataSource[i + 3] & 0xC0) >> 6);
-				if (bitrateIndex == 0xF || rateIndex > 2) // bad
+				if (bitrateIndex == 0xF || rateIndex > 2) // bad header, resync one byte later
 				{
-					return false;
 					i++;
 					continue;
 				}
@@ -97,10 +100,11 @@ bool AudioStreamMp3::Init(Audio *audio, const String &path, bool preload)
 				uint32 sampleRate = mp3_freq_tab[rateIndex];
 				uint32 padding = paddingEnabled ? 1 : 0;
 
-				uint32 frameLength = 144 * bitrate / sampleRate + padding;
-				if (frameLength == 0)
+				// MPEG2/2.5 Layer III frames are 72 * bitrate / rate, MPEG1 uses 144.
+				// Using 144 for both desynchronised the frame table on VBR MPEG2 files.
+				uint32 frameLength = (linearVersion == 0 ? 144 : 72) * bitrate / sampleRate + padding;
+				if (frameLength == 0 || frameLength > m_mp3dataLength)
 				{
-					return false;
 					i++;
 					continue;
 				}
@@ -225,10 +229,12 @@ int32 AudioStreamMp3::DecodeData_Internal()
 			}
 			else if ((uint64)m_playPos >= m_samplesTotal)
 			{
-				m_currentBufferSize = samplesPerRead;
-				m_remainingBufferData = samplesPerRead;
+				// Only the frames written so far are valid; replaying the whole
+				// block repeated the stale tail of the previous decode.
+				m_currentBufferSize = (int32)i;
+				m_remainingBufferData = (int32)i;
 				m_playing = false;
-				return i;
+				return (int32)i;
 			}
 			m_readBuffer[0][i] = m_pcm[m_playPos * 2];
 			m_readBuffer[1][i] = m_pcm[m_playPos * 2 + 1];

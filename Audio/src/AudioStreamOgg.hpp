@@ -6,10 +6,11 @@
 class AudioStreamOgg : public AudioStreamBase
 {
 protected:
-	OggVorbis_File m_ovf;
+	OggVorbis_File m_ovf = {};
+	bool m_ovfOpened = false;
 	vorbis_info m_info;
 	Vector<float> m_pcm;
-	int64 m_playPos;
+	int64 m_playPos = 0;
 
 	bool Init(Audio *audio, const String &path, bool preload) override;
 	void SetPosition_Internal(int32 pos) override;

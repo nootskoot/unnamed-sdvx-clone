@@ -12,9 +12,10 @@ AudioStreamOgg::~AudioStreamOgg()
 	}
 	delete[] m_readBuffer;
 
-	if (!m_preloaded)
+	if (!m_preloaded && m_ovfOpened)
 	{
 		ov_clear(&m_ovf);
+		m_ovfOpened = false;
 	}
 }
 
@@ -34,12 +35,27 @@ bool AudioStreamOgg::Init(Audio *audio, const String &path, bool preload)
 		Logf("ov_open_callbacks failed with code %d", Logger::Severity::Error, r);
 		return false;
 	}
+	m_ovfOpened = true;
 
 	vorbis_comment *comments = ov_comment(&m_ovf, 0);
 	vorbis_info *infoPtr = ov_info(&m_ovf, 0);
 	if (!infoPtr)
+	{
+		Logf("Ogg has no stream info", Logger::Severity::Error);
+		ov_clear(&m_ovf);
+		m_ovfOpened = false;
 		return false;
+	}
 	m_info = *infoPtr;
+	if (m_info.channels < 1 || m_info.channels > 2)
+	{
+		// More than two channels left m_pcm empty while m_samplesTotal still
+		// counted frames, so playback read past the buffer.
+		Logf("Ogg has %d channels, only mono/stereo is supported", Logger::Severity::Error, m_info.channels);
+		ov_clear(&m_ovf);
+		m_ovfOpened = false;
+		return false;
+	}
 	m_samplesTotal = ov_pcm_total(&m_ovf, 0);
 
 	if (preload)
@@ -47,36 +63,47 @@ bool AudioStreamOgg::Init(Audio *audio, const String &path, bool preload)
 		float **readBuffer;
 		int r;
 		int totalRead = 0;
+		int errorCount = 0;
 		while (true)
 		{
 			r = ov_read_float(&m_ovf, &readBuffer, 1024, 0);
 			if (r < 0)
+			{
+				// A truncated or damaged file can return errors forever; bail instead of hanging the loader
+				if (++errorCount > 8)
+				{
+					Logf("Ogg decode failed repeatedly (code %d), truncating", Logger::Severity::Warning, r);
+					break;
+				}
 				continue;
+			}
+			errorCount = 0;
 			if (r == 0)
 				break;
+
+			if (m_info.channels == 2)
+			{
+				for (int i = 0; i < r; i++)
+				{
+					m_pcm.Add(readBuffer[0][i]);
+					m_pcm.Add(readBuffer[1][i]);
+				}
+			}
 			else
 			{
-				if (m_info.channels == 2)
+				// Mono is duplicated into both channels
+				for (int i = 0; i < r; i++)
 				{
-					for (int i = 0; i < r; i++)
-					{
-						m_pcm.Add(readBuffer[0][i]);
-						m_pcm.Add(readBuffer[1][i]);
-					}
+					m_pcm.Add(readBuffer[0][i]);
+					m_pcm.Add(readBuffer[0][i]);
 				}
-				else if (m_info.channels == 1)
-				{
-					for (int i = 0; i < r; i++)
-					{
-						m_pcm.Add(readBuffer[0][i]);
-						m_pcm.Add(readBuffer[0][i]);
-					}
-				}
-				totalRead += r;
 			}
+			totalRead += r;
 		}
-		m_samplesTotal = totalRead;
+		// Frame count is what actually made it into the buffer, not what the header promised
+		m_samplesTotal = m_pcm.size() / 2;
 		ov_clear(&m_ovf);
+		m_ovfOpened = false;
 		m_playPos = 0;
 	}
 	m_initSampling(m_info.rate);
@@ -112,7 +139,7 @@ int32 AudioStreamOgg::GetStreamRate_Internal()
 
 float *AudioStreamOgg::GetPCM_Internal()
 {
-	if (m_preloaded)
+	if (m_preloaded && !m_pcm.empty())
 		return &m_pcm.front();
 	return nullptr;
 }
@@ -149,8 +176,6 @@ int32 AudioStreamOgg::DecodeData_Internal()
 			}
 			else if ((uint64)m_playPos >= m_samplesTotal)
 			{
-				m_currentBufferSize = m_bufferSize;
-				m_remainingBufferData = m_bufferSize;
 				m_readBuffer[0][i] = 0;
 				m_readBuffer[1][i] = 0;
 				if (!earlyOut)
@@ -164,8 +189,10 @@ int32 AudioStreamOgg::DecodeData_Internal()
 			m_readBuffer[1][i] = m_pcm[m_playPos * 2 + 1];
 			m_playPos++;
 		}
-		m_currentBufferSize = samplesPerRead;
-		m_remainingBufferData = samplesPerRead;
+		// Only the frames actually written above are valid. Leaving the count at
+		// samplesPerRead made the mixer replay the stale tail of the previous block.
+		m_currentBufferSize = retVal;
+		m_remainingBufferData = retVal;
 		return retVal;
 	}
 

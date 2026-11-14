@@ -84,7 +84,7 @@ public:
 		}
 
 
-		m_deviceId = SDL_OpenAudioDevice(dev, 0, &desiredSpec, &m_audioSpec, SDL_AUDIO_ALLOW_ANY_CHANGE);
+		m_deviceId = SDL_OpenAudioDevice(dev, 0, &desiredSpec, &m_audioSpec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
 		if(m_deviceId == 0 || m_deviceId < 2)
 		{
             const char* errMsg = SDL_GetError();
@@ -97,12 +97,18 @@ public:
 	}
 	bool Init()
 	{
-		OpenDevice(nullptr);
-		return true;
+		if (!OpenDevice(nullptr))
+			return false;
+		return m_audioSpec.freq != 0 && m_audioSpec.channels != 0;
 	}
 	static void SDLCALL FillBuffer(AudioOutput_Impl* self, float* data, int len)
 	{
-		uint32 bufferSamples = (uint32)(len / (4 * self->m_audioSpec.channels));
+		// Derive the frame count from the format the device actually gave us.
+		// Hardcoding 4 bytes per sample halved every frame count on a 16-bit device.
+		const uint32 bytesPerFrame = (uint32)((SDL_AUDIO_BITSIZE(self->m_audioSpec.format) / 8) * self->m_audioSpec.channels);
+		if (bytesPerFrame == 0)
+			return;
+		uint32 bufferSamples = (uint32)len / bytesPerFrame;
 		if(self->m_mixer)
 			self->m_mixer->Mix(data, bufferSamples);
 	}
@@ -130,7 +136,9 @@ uint32_t AudioOutput::GetSampleRate() const
 }
 double AudioOutput::GetBufferLength() const
 {
-	return 0;
+	if (m_impl->m_audioSpec.freq == 0)
+		return 0;
+	return (double)m_impl->m_audioSpec.samples / (double)m_impl->m_audioSpec.freq;
 }
 void AudioOutput::Start(IMixer* mixer)
 {
@@ -138,10 +146,20 @@ void AudioOutput::Start(IMixer* mixer)
 }
 void AudioOutput::Stop()
 {
+	if (m_impl->m_deviceId != 0)
+	{
+		// Stop the callback and wait out any in-flight one before the mixer is destroyed
+		SDL_PauseAudioDevice(m_impl->m_deviceId, 1);
+		SDL_LockAudioDevice(m_impl->m_deviceId);
+	}
 	m_impl->m_mixer = nullptr;
+	if (m_impl->m_deviceId != 0)
+	{
+		SDL_UnlockAudioDevice(m_impl->m_deviceId);
+	}
 }
 bool AudioOutput::IsIntegerFormat() const
 {
-	return false;
+	return SDL_AUDIO_ISINT(m_impl->m_audioSpec.format);
 }
 #endif

@@ -29,7 +29,19 @@ KShootTime::operator bool() const
 
 KShootMap::TickIterator::TickIterator(KShootMap& map, KShootTime start /*= KShootTime(0, 0)*/) : m_time(start), m_map(map)
 {
-	if(!m_map.GetBlock(m_time, m_currentBlock))
+	SeekBlock();
+}
+void KShootMap::TickIterator::SeekBlock()
+{
+	// Skip measures that contain no chart lines. Two consecutive "--" lines used to
+	// produce an empty block, and GetBlock() reported end-of-map from that point on,
+	// silently dropping every note after it.
+	while (m_time.block < m_map.blocks.size() && m_map.blocks[m_time.block].ticks.empty())
+		m_time.block++;
+
+	if (m_time.block < m_map.blocks.size())
+		m_currentBlock = &m_map.blocks[m_time.block];
+	else
 		m_currentBlock = nullptr;
 }
 KShootMap::TickIterator& KShootMap::TickIterator::operator++()
@@ -39,8 +51,7 @@ KShootMap::TickIterator& KShootMap::TickIterator::operator++()
 	{
 		m_time.tick = 0;
 		m_time.block++;
-		if(!m_map.GetBlock(m_time, m_currentBlock))
-			m_currentBlock = nullptr;
+		SeekBlock();
 	}
 	return *this;
 }
@@ -86,11 +97,12 @@ bool ParseKShootCourse(BinaryStream& input, Map<String, String>& settings, Vecto
 
 	uint32_t lineNumber = 0;
 	String line;
-	static const String lineEnding = "\r\n";
+	static const String lineEnding = "\n";
 
 	// Parse header (encoding-agnostic)
 	while(TextStream::ReadLine(input, line, lineEnding))
 	{
+		line.TrimBack('\r');
 		line.Trim();
 		lineNumber++;
 		if(line == "--")
@@ -132,6 +144,7 @@ bool ParseKShootCourse(BinaryStream& input, Map<String, String>& settings, Vecto
 
 	while (TextStream::ReadLine(input, line, lineEnding))
 	{
+		line.TrimBack('\r');
 		line.Trim();
 		lineNumber++;
 		if (line.empty() || line[0] != '[')
@@ -182,11 +195,12 @@ bool KShootMap::Init(BinaryStream& input, bool metadataOnly)
 
 	uint32_t lineNumber = 0;
 	String line;
-	static const String lineEnding = "\r\n";
+	static const String lineEnding = "\n";
 
 	// Parse header (encoding-agnostic)
 	while(TextStream::ReadLine(input, line, lineEnding))
 	{
+		line.TrimBack('\r');
 		line.Trim();
 		lineNumber++;
 		if(line == c_sep)
@@ -242,6 +256,7 @@ bool KShootMap::Init(BinaryStream& input, bool metadataOnly)
 	KShootTime time = KShootTime(0, 0);
 	while(TextStream::ReadLine(input, line, lineEnding))
 	{
+		line.TrimBack('\r');
 		lineNumber++;
 		if(line.empty())
 		{

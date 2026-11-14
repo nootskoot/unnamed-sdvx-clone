@@ -82,6 +82,8 @@ public:
 	Thread m_audioThread;
 	IMixer* m_mixer = nullptr;
 	bool m_exclusive = false;
+	// Resolved sample format of the open device; see OpenDevice
+	bool m_isFloatFormat = true;
 
 public:
 	AudioOutput_Impl()
@@ -270,6 +272,22 @@ public:
 		}
 		// Store selected format
 		m_format = *mixFormat;
+		// WAVE_FORMAT_EXTENSIBLE carries the real sample format in SubFormat, which a
+		// copy into WAVEFORMATEX discards. Resolve it while the full struct is alive.
+		// (SubFormat Data1: 1 = PCM, 3 = IEEE float.)
+		if (mixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+		{
+			m_isFloatFormat = true;
+		}
+		else if (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+		{
+			const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(mixFormat);
+			m_isFloatFormat = (ext->SubFormat.Data1 == 3);
+		}
+		else
+		{
+			m_isFloatFormat = false;
+		}
 		CoTaskMemFree(mixFormat);
 
 		// Check if initialization was succesfull
@@ -303,6 +321,7 @@ public:
 	{
 		m_format.nSamplesPerSec = freq;
 		m_format.nChannels = 2;
+		m_isFloatFormat = true;
 		m_dummyTimer.Restart();
 		m_dummyTimerPos = 0;
 		return true;
@@ -456,8 +475,7 @@ double AudioOutput::GetBufferLength() const
 }
 bool AudioOutput::IsIntegerFormat() const
 {
-	///TODO: check more cases?
-	return m_impl->m_format.wFormatTag == WAVE_FORMAT_PCM && m_impl->m_format.wBitsPerSample != 32;
+	return !m_impl->m_isFloatFormat;
 }
 
 static const char* GetDisplayString(HRESULT code)

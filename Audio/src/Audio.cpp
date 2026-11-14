@@ -71,12 +71,17 @@ void Audio_Impl::Mix(void *data, uint32 &numSamples)
 			// Apply volume levels
 			for (uint32 i = 0; i < m_sampleBufferLength; i++)
 			{
-				m_sampleBuffer[i * 2 + 0] *= globalVolume;
-				m_sampleBuffer[i * 2 + 1] *= globalVolume;
 				// Safety clamp to [-1, 1] that should help protect speakers a bit in case of corruption
-				// this will clip, but so will values outside [-1, 1] anyway
-				m_sampleBuffer[i * 2 + 0] = fmin(fmax(m_sampleBuffer[i * 2 + 0], -1.f), 1.f);
-				m_sampleBuffer[i * 2 + 1] = fmin(fmax(m_sampleBuffer[i * 2 + 1], -1.f), 1.f);
+				// this will clip, but so will values outside [-1, 1] anyway.
+				// Non-finite values must be handled explicitly: fmax(NaN, -1) returns -1, so a single
+				// NaN out of an unstable filter would otherwise become a full-scale DC step.
+				for (uint32 c = 0; c < 2; c++)
+				{
+					float s = m_sampleBuffer[i * 2 + c] * globalVolume;
+					if (!std::isfinite(s))
+						s = 0.0f;
+					m_sampleBuffer[i * 2 + c] = Math::Clamp(s, -1.f, 1.f);
+				}
 			}
 
 			// Set new remaining buffer data
@@ -86,9 +91,25 @@ void Audio_Impl::Mix(void *data, uint32 &numSamples)
 		// Copy samples from sample buffer
 		uint32 sampleOffset = m_sampleBufferLength - m_remainingSamples;
 		uint32 maxSamples = Math::Min(numSamples - currentNumberOfSamples, m_remainingSamples);
-		for (uint32 c = 0; c < outputChannels; c++)
+		if (outputChannels == 1)
 		{
-			if (c < 2)
+			// Mono device: fold stereo down instead of dropping the right channel
+			for (uint32 i = 0; i < maxSamples; i++)
+			{
+				float mono = 0.5f * (m_sampleBuffer[(sampleOffset + i) * 2 + 0] + m_sampleBuffer[(sampleOffset + i) * 2 + 1]);
+				if (output->IsIntegerFormat())
+				{
+					((int16 *)data)[currentNumberOfSamples + i] = (int16)(0x7FFF * Math::Clamp(mono, -1.f, 1.f));
+				}
+				else
+				{
+					((float *)data)[currentNumberOfSamples + i] = mono;
+				}
+			}
+		}
+		else
+		{
+			for (uint32 c = 0; c < outputChannels && c < 2; c++)
 			{
 				for (uint32 i = 0; i < maxSamples; i++)
 				{
@@ -181,6 +202,10 @@ bool Audio::Init(bool exclusive)
 	}
 
 	g_impl.Start();
+
+	// Real output latency in ms. Only the debug overlay reads this today; chart
+	// timing still does not subtract it.
+	audioLatency = (int64)(g_impl.output->GetBufferLength() * 1000.0);
 
 	return m_initialized = true;
 }

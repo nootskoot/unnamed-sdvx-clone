@@ -104,12 +104,13 @@ void AudioStreamMa::SetPosition_Internal(int32 pos)
 
 	if (!m_preloaded)
 	{
-		//seek_to_pcm_frame is very slow
-		//we want to use ma_decoder_seek_bytes_64
-		//but we require some stuff to do that properly
-
-		//ma_decoder_seek_to_pcm_frame(&m_decoder, pos);
-		return;
+		// The decoder has to follow the pointer, otherwise a seek only moved the
+		// reported time and the stream kept playing from wherever it already was.
+		ma_result res = ma_decoder_seek_to_pcm_frame(&m_decoder, (ma_uint64)pos);
+		if (res != MA_SUCCESS)
+		{
+			Logf("ma_decoder_seek_to_pcm_frame(%d) failed: %d", Logger::Severity::Warning, pos, res);
+		}
 	}
 }
 int32 AudioStreamMa::DecodeData_Internal()
@@ -122,9 +123,9 @@ int32 AudioStreamMa::DecodeData_Internal()
 		{
 			if (m_playbackPointer >= (int64)m_samplesTotal)
 			{
-				m_currentBufferSize = samplesPerRead;
-				m_remainingBufferData = samplesPerRead;
-				return i;
+				m_currentBufferSize = (int32)i;
+				m_remainingBufferData = (int32)i;
+				return (int32)i;
 			}
 			m_readBuffer[0][i] = m_pcm[m_playbackPointer * 2];
 			m_readBuffer[1][i] = m_pcm[m_playbackPointer * 2 + 1];
@@ -146,9 +147,13 @@ int32 AudioStreamMa::DecodeData_Internal()
 			m_readBuffer[0][i] = decodeBuffer[i * 2];
 			m_readBuffer[1][i] = decodeBuffer[i * 2 + 1];
 		}
-		m_currentBufferSize = totalRead;
-		m_remainingBufferData = totalRead;
-		return totalRead;
+		// Keep the reported position in step with the decoder. Without this the
+		// streaming path always reported 0, so the mixer ran a negative sample
+		// position and emitted silence after the first block.
+		m_playbackPointer += (int64)totalRead;
+		m_currentBufferSize = (int32)totalRead;
+		m_remainingBufferData = (int32)totalRead;
+		return (int32)totalRead;
 	}
 	return 0;
 }
