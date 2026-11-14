@@ -275,6 +275,10 @@ public:
 	virtual const char *GetName() const { return "FlangerDSP"; }
 
 private:
+	// Guards the members below. Setters run on the game thread while Process() runs on the audio
+	// thread, and SetDelayRange resizes m_sampleBuffer (which Process holds a raw pointer into).
+	std::mutex m_stateLock;
+
 	uint32 m_length = 0;
 
 	// Delay range
@@ -306,6 +310,10 @@ public:
 	virtual const char *GetName() const { return "EchoDSP"; }
 
 private:
+	// Guards the members below. SetLength clears/resizes m_sampleBuffer on the game thread while
+	// Process() runs on the audio thread with a raw pointer into it.
+	std::mutex m_stateLock;
+
 	uint32 m_bufferLength = 0;
 	size_t m_bufferOffset = 0;
 	uint32 m_numLoops = 0;

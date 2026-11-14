@@ -609,11 +609,13 @@ FlangerDSP::FlangerDSP(uint32 sampleRate) : DSP()
 }
 void FlangerDSP::SetLength(double length)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	double flength = length / 1000.0 * m_sampleRate;
 	m_length = (uint32)flength;
 }
 void FlangerDSP::SetDelayRange(uint32 offset, uint32 depth)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	// Assuming 44100hz is the base sample rate
 	const uint32 max = offset + depth;
 	const uint32 min = offset;
@@ -627,18 +629,22 @@ void FlangerDSP::SetDelayRange(uint32 offset, uint32 depth)
 }
 void FlangerDSP::SetFeedback(float feedback)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	m_feedback = feedback;
 }
 void FlangerDSP::SetStereoWidth(float stereoWidth)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	m_stereoWidth = stereoWidth;
 }
 void FlangerDSP::SetVolume(float volume)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	m_volume = volume;
 }
 void FlangerDSP::Process(float *out, uint32 numSamples)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	if (m_bufferLength <= 0 || m_length == 0)
 		return;
 	float *data = m_sampleBuffer.data();
@@ -694,6 +700,7 @@ EchoDSP::EchoDSP(uint32 sampleRate) : DSP()
 }
 void EchoDSP::SetLength(double length)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	double flength = length / 1000.0 * m_sampleRate;
 	const uint32 newLength = uint32(std::max(0.0, flength)) * 2;
     if (newLength == m_bufferLength) return;
@@ -706,6 +713,7 @@ void EchoDSP::SetLength(double length)
 }
 void EchoDSP::Process(float *out, uint32 numSamples)
 {
+	std::lock_guard<std::mutex> guard(m_stateLock);
 	float *data = m_sampleBuffer.data();
 	if (!data || m_bufferLength < 2)
 		return;
