@@ -558,6 +558,9 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
        m_beatmap->GetMapSettings().peakingFilterDelay>0 && (!m_fxtrack || m_singleF)) {
         active=m_laserAudioSampler.Sample(double(m_playback->GetLastTime())-
             m_beatmap->GetMapSettings().peakingFilterDelay,eligibleLanes,input);
+    } else if(active && m_beatmap && m_playback && m_beatmap->GetMapSettings().legacyLaserTail &&
+              m_laserAudioSampler.InLegacyTail(double(m_playback->GetLastTime()),eligibleLanes)) {
+        active=false; // KSM v1: no laser effect on a section's short final segment (all laser effects, not only the peaking filter)
     }
     auto independent=m_namedLaserFilters.find(uint16(m_laserEffectType));
     if(independent!=m_namedLaserFilters.end() && independent->second.dsp && (independent->second.mix>0 || independent->second.effect.type==EffectType::Retrigger)) {

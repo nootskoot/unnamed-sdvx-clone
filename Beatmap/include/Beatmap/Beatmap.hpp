@@ -26,6 +26,8 @@ struct BeatmapSettings
 	String audioFX;
     String audioLaserFX, audioCombinedFX; // Optional legacy P and FP stems; populated on chart load.
     int peakingFilterDelay = 0;
+    // KSH v1 rule (KSM): the last segment of a laser section gets no audio effect if it is 1/32 note or shorter and no slam is involved
+    bool legacyLaserTail = false;
 	// Path to the jacket image
 	String jacketPath;
 	// Path to the background and foreground shader files

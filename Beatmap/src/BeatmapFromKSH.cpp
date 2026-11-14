@@ -623,6 +623,7 @@ bool Beatmap::m_ProcessKShootMap(BinaryStream &input, bool metadataOnly)
 	m_settings.slamVolume = 0.5f; // KSH default chokkakuvol=50
     m_settings.slamAutoVolume = true; // KSH default chokkakuautovol=1
     m_settings.peakingFilterDelay = 40;
+    m_settings.legacyLaserTail = true; // KSH v1 parser: ver >= 200 goes through the kson path
     m_settings.laserEffectMix = 0.5f; // KSH default pfiltergain=50
 	for (auto &s : kshootMap.settings)
 	{
