@@ -76,6 +76,9 @@ void AudioStreamPcm::PreRenderDSPs_Internal(Vector<DSP *> &DSPs)
     {
         m_playPos = ((uint64)dsp->startTime * (uint64)m_sampleRate) / 1000;
         m_samplePos = m_playPos;
+        // The DSP is about to be run over [startTime, endTime); its clock is the
+        // first frame of that range, not the end of it.
+        m_updateBlockStartSample();
         int64 endSamplePos = ((uint64)dsp->endTime * (uint64)m_sampleRate) / 1000;
         endSamplePos = Math::Min(endSamplePos, (int64)m_samplesTotal);
         if (m_playPos >= endSamplePos)
@@ -94,6 +97,7 @@ void AudioStreamPcm::PreRenderDSPs_Internal(Vector<DSP *> &DSPs)
     }
     m_playPos = originalPlayPos;
     m_samplePos = m_playPos;
+    m_updateBlockStartSample();
 }
 
 AudioStreamPcm::~AudioStreamPcm()

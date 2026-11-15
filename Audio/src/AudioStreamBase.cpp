@@ -101,6 +101,14 @@ uint64 AudioStreamBase::GetSamplePos() const
 	return m_samplePos;
 }
 
+void AudioStreamBase::m_updateBlockStartSample()
+{
+	// At this point m_samplePos is the position of the next frame to be produced,
+	// i.e. the first frame of the block about to be rendered. Negative positions
+	// come from a stream that starts before zero, which counts as the start.
+	blockStartSample = m_samplePos > 0 ? static_cast<uint64>(m_samplePos) : 0;
+}
+
 int32 AudioStreamBase::GetPosition() const
 {
 	return (int32)(m_getPositionSeconds() * 1000.0);
@@ -137,10 +145,18 @@ void AudioStreamBase::m_restartTiming()
 }
 void AudioStreamBase::PreRenderDSPs(Vector<DSP *> &DSPs)
 {
+	// Offline path: each DSP is run over the range it covers, so the clock has to
+	// follow m_samplePos here too, not only in Process.
+	m_updateBlockStartSample();
 	PreRenderDSPs_Internal(DSPs);
 }
 void AudioStreamBase::Process(float *out, uint32 numSamples)
 {
+	// First, before anything below advances m_samplePos: the mixer runs the DSP
+	// chain after this returns, and every effect must see the first frame of this
+	// block rather than the frame the stream has reached by the end of it.
+	m_updateBlockStartSample();
+
 	if (!m_playing || m_paused)
 		return;
 

@@ -50,12 +50,20 @@ protected:
 	void m_restartTiming();
 	double m_getPositionSeconds(bool allowFreezeSkip = true) const;
 
+	// Points blockStartSample at the first frame that is about to be processed,
+	// before m_samplePos is advanced past it. Overrides of
+	// PreRenderDSPs_Internal must call this each time they move m_samplePos.
+	void m_updateBlockStartSample();
+
 	// Implementation specific set position
 	virtual void SetPosition_Internal(int32 pos) = 0;
 	virtual int32 GetStreamPosition_Internal() = 0;
 	virtual float *GetPCM_Internal() = 0;
 	virtual uint32 GetSampleRate_Internal() const = 0;
 	virtual uint64 GetSampleCount_Internal() const = 0;
+	// Renders DSPs over the range each one covers. An override must keep
+	// blockStartSample in step with m_samplePos (m_updateBlockStartSample), or the
+	// pre-rendered path keeps handing effects the end of the range instead.
 	virtual void PreRenderDSPs_Internal(Vector<DSP *> &DSPs){};
 	// Internal sample rate
 	virtual int32 GetStreamRate_Internal() = 0;

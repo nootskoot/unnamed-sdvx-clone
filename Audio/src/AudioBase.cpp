@@ -10,7 +10,14 @@ uint32 DSP::GetStartSample() const
 
 uint32 DSP::GetCurrentSample() const
 {
-	return static_cast<uint32>(m_audioBase->GetSamplePos());
+	if (!m_audioBase)
+		return 0;
+
+	// The block start, not the stream position: AudioStreamBase::Process finishes
+	// by advancing the stream past the block it just decoded, so GetSamplePos()
+	// would hand every DSP the first frame of the next block and every startTime
+	// comparison would be one buffer late.
+	return static_cast<uint32>(m_audioBase->blockStartSample);
 }
 
 DSP::~DSP()

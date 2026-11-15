@@ -102,6 +102,19 @@ public:
 	float PlaybackSpeed = 1.0;
 	class Audio_Impl *audio = nullptr;
 
+	// Sample position of the first frame of the block currently being processed.
+	// The mixer decodes a whole block before it runs the DSP chain and only then
+	// writes the stream position past it, so GetSamplePos() during ProcessDSPs
+	// already points at the next block. This is the clock an effect should read
+	// instead: DSP::GetCurrentSample() returns it.
+	uint64 blockStartSample = 0;
+
+	[[nodiscard]]
+	uint64 GetBlockStartSample() const noexcept
+	{
+		return blockStartSample;
+	}
+
 private:
 	float m_volume = 1.0f;
 };
