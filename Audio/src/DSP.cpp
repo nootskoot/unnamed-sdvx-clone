@@ -270,20 +270,15 @@ GateDSP::GateDSP(uint32 sampleRate) : DSP()
 void GateDSP::SetLength(double length)
 {
 	double flength = length / 1000.0 * m_sampleRate;
+	m_lengthExact = flength;
 	m_length = (uint32)flength;
 	SetGating(m_gating);
 }
 void GateDSP::SetGating(float gating)
 {
 	gating = Math::Clamp(gating, 0.f, 1.f);
-	float flength = (float)m_length;
 	m_gating = gating;
-	m_halfway = (uint32)(flength * gating);
-    // Keep both ramps inside their respective on/off windows. Endpoints
-    // (fully closed/open) have no ramps and must never divide by zero.
-    m_fadeIn = std::min({uint32(flength * 0.05f), m_halfway / 2,
-        (m_length - m_halfway) / 2});
-    m_fadeOut = m_halfway - m_fadeIn;
+	m_halfway = (uint32)((float)m_length * gating);
 	if (m_length) m_currentSample %= m_length;
 }
 void GateDSP::Process(float *out, uint32 numSamples)
@@ -310,15 +305,25 @@ void GateDSP::Process(float *out, uint32 numSamples)
             while (measure != m_measureTimes.end() && *measure <= time) ++measure;
             const double origin = measure == m_measureTimes.begin() ? m_measureTimes.front() : *std::prev(measure);
             const double elapsed = std::max(0.0, (time-origin) * m_sampleRate / (1000.0*speed));
-            m_currentSample = uint32(std::fmod(elapsed, double(m_length)));
+            // Use the untruncated period so the phase does not slip half a frame per
+            // gate period; m_length stays the integer used for the sample counter.
+            const double period = m_lengthExact > 0.0 ? m_lengthExact : double(m_length);
+            m_currentSample = uint32(std::fmod(elapsed, period));
         }
-        float c = m_currentSample < m_halfway ? 1.0f : 0.0f;
-        if (m_fadeIn != 0) {
-            if (m_currentSample < m_halfway && m_currentSample > m_fadeOut)
-                c = float(m_halfway - m_currentSample) / float(m_fadeIn);
-            else if (m_currentSample >= m_length - m_fadeIn)
-                c = float(m_currentSample - (m_length - m_fadeIn)) / float(m_fadeIn);
-        }
+		// ksmaudio GateDSP.cpp Scale(): full gain for every frame of the open
+		// window, then a 12-frame falling edge that begins *after* the window and
+		// is divided by 13, so the last release frame is 1/13 and the frame after
+		// it is silence. The edge is skipped when the window is 12 frames or
+		// shorter, which upstream does on purpose: a short gate stays hard-edged
+		// rather than losing its level to a ramp wider than the gate itself.
+		float c = 1.0f;
+		if (m_currentSample >= m_halfway)
+		{
+			if (m_halfway > kDeclickFrames && m_currentSample < m_halfway + kDeclickFrames)
+				c = float(kDeclickFrames - (m_currentSample - m_halfway)) / float(kDeclickFrames + 1U);
+			else
+				c = 0.0f;
+		}
 
 		// Multiply volume
 		c = (c * (1 - low) + low); // Range [low, 1]

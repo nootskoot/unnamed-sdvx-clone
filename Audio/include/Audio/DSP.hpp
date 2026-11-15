@@ -138,11 +138,16 @@ public:
 private:
 	std::vector<double> m_measureTimes;
     double m_clockOffset = 0;
+	// ksmaudio GateDSP.cpp: 12-frame falling-edge release, no attack ramp.
+	static constexpr uint32 kDeclickFrames = 12;
+
 	float m_gating = 0.5f;
 	uint32 m_length = 0;
-	uint32 m_fadeIn = 0;  // Fade In mark
-	uint32 m_fadeOut = 0; // Fade Out mark
-	uint32 m_halfway{};	  // Halfway mark
+	// The period before truncation to whole samples. A 1/16 note at 200 BPM is
+	// 3307.5 frames, and truncating it makes a measure-anchored phase lose half a
+	// frame per period, which is a visible drift by the end of the bar.
+	double m_lengthExact = 0.0;
+	uint32 m_halfway{};	  // Frames held at full gain, from the period start
 	uint32 m_currentSample = 0;
 };
 
