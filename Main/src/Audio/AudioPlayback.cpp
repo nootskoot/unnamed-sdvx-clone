@@ -8,6 +8,7 @@
 #include <Beatmap/KSHFilter.hpp>
 #include <cstdlib>  // opt-in audio comparison environment switches
 #include <Shared/Profiling.hpp>
+#include <Audio/MeasureClock.hpp>
 // USC_AUDIO_PROBE_PATCH_20261110: default game audio is unchanged.
 // Set USC_AUDIO_PROBE=1 for structured event/gain logs.
 // Diagnostic-only: this probe does not alter DSP mixing or FX state.
@@ -82,6 +83,10 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
     m_legacyFXActive=m_legacyLaserActive=false;
 	m_playback = &playback;
 	m_beatmap = &playback.GetBeatmap();
+    // Timing points are fixed per chart; a new chart invalidates the measure lines
+    // rebuilt from them.
+    m_kshMeasureTimes.clear();
+    m_kshMeasureTimesBuilt = false;
     m_laserAudioSampler.Build(*m_beatmap);
 	m_beatmapRootPath = "";
 	m_chartSource = std::move(chartSource);
@@ -259,9 +264,37 @@ AudioEffect AudioPlayback::m_ResolveInactiveEffect(EffectType type) const {
     if(auto* effect=m_beatmap->GetInactiveFilter(type))return *effect;
     return m_ResolveEffect(type,true);
 }
+const std::vector<double>& AudioPlayback::m_GetKshMeasureTimes() {
+    if (m_kshMeasureTimesBuilt) return m_kshMeasureTimes;
+    m_kshMeasureTimesBuilt = true;
+    m_kshMeasureTimes.clear();
+    if (!m_beatmap) return m_kshMeasureTimes;
+
+    // KSH v1 stores no bar list, only timing points, so the measure lines are
+    // rebuilt from the timing map. Timing points are fixed for the life of a
+    // chart, so this runs once per song rather than once per gate.
+    m_kshMeasureTimes = MeasureClock::BuildMeasureTimes(
+        m_beatmap->GetTimingPoints(),
+        double(m_beatmap->GetLastObjectTimeIncludingEvents()));
+    return m_kshMeasureTimes;
+}
 void AudioPlayback::m_ConfigureGateClock(DSP* dsp, const AudioEffect& effect) {
-    if (dsp && effect.type == EffectType::Gate && m_beatmap->GetKSONScroll())
-        static_cast<GateDSP*>(dsp)->SetMeasureTimes(m_beatmap->GetKSONBarTimes(), m_playback->audioOffset);
+    if (!dsp || effect.type != EffectType::Gate) return;
+    if (!m_beatmap || !m_playback) return;
+
+    // A gate free-runs from whatever frame constructed its object unless it is given
+    // the chart's measure grid, which is what puts its open window on the pulse the
+    // chart asked for. KSON ships the bar list; KSH v1 needs it rebuilt from the
+    // timing map, because a KSH timing point carries only the bar duration.
+    const bool kson = m_beatmap->GetKSONScroll() != nullptr;
+    const std::vector<double>& times = kson
+        ? m_beatmap->GetKSONBarTimes()
+        : m_GetKshMeasureTimes();
+    static_cast<GateDSP*>(dsp)->SetMeasureTimes(times, m_playback->audioOffset);
+    if (USC_AudioProbe())
+        Logf("[AUDIO-PROBE] GATE_CLOCK dsp=%s src=%s measures=%u offset=%d",
+            Logger::Severity::Warning, dsp->GetName(), kson ? "kson_bars" : "timing_map",
+            unsigned(times.size()), int(m_playback->audioOffset));
 }
 void AudioPlayback::m_UpdateAutomation(MapTime time)
 {
@@ -1075,6 +1108,10 @@ void AudioPlayback::m_PreRenderDSPTrack()
 					dsp->startTime = chartObj->time;
 					dsp->endTime = dsp->startTime + holdObj->duration;
 					dsp->SetAudioBase(m_fxtrack.get());
+					// The pre-rendered track runs the same gate over a different stream, so
+					// it needs the same chart clock; without it the gate free-runs from the
+					// offline render's first frame and lands off the grid there too.
+					m_ConfigureGateClock(dsp, effect);
 					dsp->priority = GameAudioEffect::GetDefaultEffectPriority(effect.type);
 					Logf("Added %s at %dms", Logger::Severity::Debug, dsp->GetName(), dsp->startTime);
 					DSPs.Add(dsp);

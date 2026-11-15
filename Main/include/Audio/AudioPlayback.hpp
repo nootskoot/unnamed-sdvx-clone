@@ -4,6 +4,7 @@
 #include <Beatmap/AudioEffects.hpp>
 #include <Audio/AudioStream.hpp>
 #include <map>
+#include <vector>
 
 /*
 	Audio effect with customized parameters
@@ -103,6 +104,11 @@ private:
     AudioEffect m_ResolveInactiveEffect(EffectType type) const;
     void m_UpdateAutomation(MapTime time);
     void m_ConfigureGateClock(class DSP* dsp, const AudioEffect& effect);
+    // Measure lines in map time for KSH v1, rebuilt from the timing map and cached
+    // for the life of the chart. KSON uses Beatmap::GetKSONBarTimes instead.
+    const std::vector<double>& m_GetKshMeasureTimes();
+    std::vector<double> m_kshMeasureTimes;
+    bool m_kshMeasureTimesBuilt = false;
     MapTime m_automationTimingTime = std::numeric_limits<MapTime>::min();
     void m_UpdateIndependentFXMix();
     std::map<EffectType, AudioEffect> m_fxOverrides, m_filterOverrides, m_inactiveOverrides;
