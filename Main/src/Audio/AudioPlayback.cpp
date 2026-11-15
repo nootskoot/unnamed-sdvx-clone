@@ -1039,26 +1039,32 @@ void AudioPlayback::m_SetLaserEffectParameter(float input, DSP* dsp)
 	}
 	case EffectType::PeakingFilter:
 	{
-		dsp->mix = m_laserEffectMix;
 		if (input > 0.8f)
 			mix *= 1.0f - (input - 0.8f) / 0.2f;
 
+		// Apply the chart gain at full strength and let BQFDSP crossfade with
+		// the dry signal. Folding mix into the gain as well applied it twice and
+		// left the filter fully in circuit at mix 0.
+		dsp->mix = Math::Clamp(mix, 0.0f, 1.0f);
 		auto *bqfDSP = (BQFDSP *)dsp;
-		bqfDSP->SetPeaking(m_laserEffect.peaking.q.Sample(input), m_laserEffect.peaking.freq.Sample(input), m_laserEffect.peaking.gain.Sample(input) * mix);
+		bqfDSP->SetPeaking(m_laserEffect.peaking.q.Sample(input), m_laserEffect.peaking.freq.Sample(input), m_laserEffect.peaking.gain.Sample(input));
 		break;
 	}
 	case EffectType::LowPassFilter:
 	{
-		dsp->mix = m_laserEffectMix;
+		// mix is the crossfade, not a Q offset: the old 0.1 Q fudge made a
+		// partial mix sound like a weak full filter instead of a blend.
+		dsp->mix = Math::Clamp(mix, 0.0f, 1.0f);
 		auto *bqfDSP = (BQFDSP *)dsp;
-		bqfDSP->SetLowPass(m_laserEffect.lpf.q.Sample(input) * mix + 0.1f, m_laserEffect.lpf.freq.Sample(input));
+		bqfDSP->SetLowPass(m_laserEffect.lpf.q.Sample(input), m_laserEffect.lpf.freq.Sample(input));
 		break;
 	}
 	case EffectType::HighPassFilter:
 	{
-		dsp->mix = m_laserEffectMix;
+		// Same law as the low-pass case above.
+		dsp->mix = Math::Clamp(mix, 0.0f, 1.0f);
 		auto *bqfDSP = (BQFDSP *)dsp;
-		bqfDSP->SetHighPass(m_laserEffect.hpf.q.Sample(input) * mix + 0.1f, m_laserEffect.hpf.freq.Sample(input));
+		bqfDSP->SetHighPass(m_laserEffect.hpf.q.Sample(input), m_laserEffect.hpf.freq.Sample(input));
 		break;
 	}
 	case EffectType::PitchShift:

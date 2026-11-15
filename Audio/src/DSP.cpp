@@ -145,11 +145,32 @@ BQFDSP::BQFDSP(uint32 sampleRate) : DSP()
 }
 void BQFDSP::Process(float *out, uint32 numSamples)
 {
+	// The filter itself always runs at full strength; the dry signal is blended
+	// in here. Previously mix was ignored, so a partial mix sounded like the
+	// full filter and callers compensated by folding mix into gain and Q
+	// upstream, which applied the parameter twice. At mix 0 the filter was
+	// still fully in circuit instead of bypassed.
+	if (mix >= 1.0f)
+	{
+		for (uint32 c = 0; c < 2; c++)
+		{
+			for (uint32 i = 0; i < numSamples; i++)
+			{
+				out[i * 2 + c] = m_filters[c].Update(out[i * 2 + c]);
+			}
+		}
+		return;
+	}
+	const float wetGain = Math::Clamp(mix, 0.0f, 1.0f);
 	for (uint32 c = 0; c < 2; c++)
 	{
 		for (uint32 i = 0; i < numSamples; i++)
 		{
-			out[i * 2 + c] = m_filters[c].Update(out[i * 2 + c]);
+			const float dry = out[i * 2 + c];
+			// Update even when fully dry so the filter state stays warm and a
+			// mix ramp cannot open on stale state, which clicks.
+			const float wet = m_filters[c].Update(dry);
+			out[i * 2 + c] = dry + (wet - dry) * wetGain;
 		}
 	}
 }
@@ -191,10 +212,30 @@ void CombinedFilterDSP::SetHighPass(float q, float freq, float peakQ, float peak
 }
 void CombinedFilterDSP::Process(float *out, uint32 numSamples)
 {
-	a.mix = mix;
-	peak.mix = mix;
-	a.Process(out, numSamples);
-	peak.Process(out, numSamples);
+	// Both stages run fully wet and the crossfade happens once, after the chain.
+	// Handing mix to each stage blended twice, so a 50 percent mix produced 25
+	// percent of the intended effect and a stacked low-pass plus peaking read
+	// as weak.
+	a.mix = 1.0f;
+	peak.mix = 1.0f;
+
+	const float wetGain = Math::Clamp(mix, 0.0f, 1.0f);
+	constexpr uint32 kChunkFrames = 256;
+	float dry[kChunkFrames * 2];
+	for (uint32 done = 0; done < numSamples;)
+	{
+		const uint32 count = Math::Min(numSamples - done, kChunkFrames);
+		float *chunk = out + done * 2;
+		for (uint32 i = 0; i < count * 2; i++) dry[i] = chunk[i];
+		a.Process(chunk, count);
+		peak.Process(chunk, count);
+		if (wetGain < 1.0f)
+		{
+			for (uint32 i = 0; i < count * 2; i++)
+				chunk[i] = dry[i] + (chunk[i] - dry[i]) * wetGain;
+		}
+		done += count;
+	}
 }
 
 LimiterDSP::LimiterDSP(uint32 sampleRate) : DSP()
