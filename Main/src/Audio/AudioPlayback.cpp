@@ -20,6 +20,30 @@ namespace {
         static const bool enabled = USC_AudioEnvironmentSwitch("USC_AUDIO_PROBE");
         return enabled;
     }
+    // KSM ends a hold's effect when the hold ends. AudioBase::ProcessDSPs renders a DSP
+    // only inside [startTime, endTime), so the authored end is stamped on the DSP the
+    // moment it exists. ClearEffect only arrives on the next game tick, which is where
+    // the extra frames of effect after the chart end were coming from.
+    void ApplyHoldEndTime(DSP* dsp, const HoldObjectState* hold) {
+        if (!dsp || !hold || hold->duration <= 0) return;
+        const MapTime end = hold->time + hold->duration;
+        // A capture or refresh time can predate the hold; the window still ends with it.
+        if (end <= 0 || end <= MapTime(dsp->startTime)) return;
+        const uint32 previous = dsp->endTime;
+        dsp->endTime = uint32(end);
+        if (USC_AudioProbe() && previous != dsp->endTime)
+            Logf("[AUDIO-PROBE] FX_WINDOW dsp=%s start=%u end=%u", Logger::Severity::Warning,
+                 dsp->GetName(), dsp->startTime, dsp->endTime);
+    }
+    // No authored end: the DSP stays in the chain until it is removed. Used where a
+    // capture bus must keep recording after the hold that borrowed it has ended.
+    void ClearHoldEndTime(DSP* dsp) {
+        if (!dsp || !dsp->endTime) return;
+        if (USC_AudioProbe())
+            Logf("[AUDIO-PROBE] FX_WINDOW dsp=%s end=0 (unbounded)", Logger::Severity::Warning,
+                 dsp->GetName());
+        dsp->endTime = 0;
+    }
 }
 
 AudioPlayback::AudioPlayback()
@@ -273,6 +297,9 @@ void AudioPlayback::m_UpdateAutomation(MapTime time)
             }
             m_buttonEffects[lane].SetParams(m_buttonDSPs[lane], *this, &params);
             m_ApplyButtonTrigger(lane);
+            // Automation re-resolves the effect while the hold is still up; keep the
+            // DSP's window tied to the hold it belongs to.
+            ApplyHoldEndTime(m_buttonDSPs[lane], hold);
         }
         SetEffectEnabled(lane, enabled);
     }
@@ -315,11 +342,16 @@ void AudioPlayback::m_UpdateIndependentFXMix() {
                 }
                 effect.SetParams(dsp,*this,&params);
                 dsp->mix=m_effectMix[activeLane];
+                // This DSP is the persistent capture bus the active hold drives.
+                ApplyHoldEndTime(dsp, m_currentHoldEffects[activeLane]);
             } else {
                 GameAudioEffect effect=m_ResolveInactiveEffect(EffectType(entry.first));
                 effect.UpdateDSP(dsp,m_playback->GetCurrentTimingPoint(),0.f,
                     m_GetDSPTrack()->GetAudioSampleRate(),GetPlaybackSpeed());
                 dsp->mix=entry.second.mix;
+                // The hold that borrowed this capture bus is gone; the bus keeps
+                // recording (and stays audible if its own mix says so) with no end.
+                ClearHoldEndTime(dsp);
             }
             continue;
         }
@@ -455,6 +487,9 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
         ? m_filterCaptureTimes.at(object->effectType) : object->time;
 	dsp->chartOffset = playback.GetBeatmap().GetMapSettings().offset;
 	dsp->lastTimingPoint = playback.GetCurrentTimingPoint().time;
+	// The hold this DSP belongs to owns its end, including when startTime was pulled
+	// back to a filter capture time.
+	ApplyHoldEndTime(dsp, object);
 
 	// Add the DSP to the track
     m_ConfigureGateClock(dsp, m_buttonEffects[index]);
@@ -608,6 +643,8 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
 			}
 
 			m_laserDSP->startTime = m_filterCaptureTimes.count(m_laserEffectType) ? m_filterCaptureTimes.at(m_laserEffectType) : m_playback->GetLastTime();
+            // No endTime here on purpose: a laser filter ends when the laser input drops
+            // (SetLaserFilterInput(0) cleans the DSP up), not at an authored hold end.
             m_laserDSP->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
             m_laserDSP->chartOffset = m_beatmap->GetMapSettings().offset;
             m_ConfigureGateClock(m_laserDSP, m_laserEffect);
@@ -677,6 +714,8 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 		1.0f, track->GetAudioSampleRate(), GetPlaybackSpeed());
 	if (!state.dsp) return;
 	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : m_playback->GetLastTime();
+	// Named filters are held by mix and trigger state, not by a chart duration, so they
+	// carry no endTime; SetNamedLaserFilterMix(0) removes them.
 	state.dsp->chartOffset = m_beatmap->GetMapSettings().offset;
 	state.dsp->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
 	state.dsp->mix = mix;
@@ -900,6 +939,7 @@ void AudioPlayback::m_MirrorLaserDSP(DSP* original, GameAudioEffect effect, floa
         m_music->AddDSP(mirror);
     }
     mirror->startTime=original->startTime;
+    mirror->endTime=original->endTime;
     mirror->chartOffset=original->chartOffset;
     mirror->lastTimingPoint=original->lastTimingPoint;
     if (ordinary) m_SetLaserEffectParameter(input,mirror);
