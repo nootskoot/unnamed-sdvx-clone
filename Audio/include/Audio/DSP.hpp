@@ -308,6 +308,8 @@ public:
 
 	void SetLength(double length);
 
+	// Delay-loop gain. Clamped below 1 while processing: the delay line sums
+	// input + repeat * feedback, so 1.0 would never decay.
 	float feedback = 0.6f;
 
 	virtual void Process(float *out, uint32 numSamples);
@@ -321,7 +323,6 @@ private:
 
 	uint32 m_bufferLength = 0;
 	size_t m_bufferOffset = 0;
-	uint32 m_numLoops = 0;
 	Vector<float> m_sampleBuffer;
 };
 

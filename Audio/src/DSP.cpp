@@ -714,7 +714,6 @@ void EchoDSP::SetLength(double length)
 	m_bufferLength = newLength;
 	m_sampleBuffer.resize(m_bufferLength);
 	memset(m_sampleBuffer.data(), 0, sizeof(float) * m_bufferLength);
-	m_numLoops = 0;
 }
 void EchoDSP::Process(float *out, uint32 numSamples)
 {
@@ -726,6 +725,12 @@ void EchoDSP::Process(float *out, uint32 numSamples)
 	const uint32 startSample = GetStartSample();
 	const uint32 currentSample = GetCurrentSample();
 
+	// The delay line sums the incoming sample with the decayed repeat, so a
+	// feedback of exactly 1 never decays and grows without bound. KSH's echo
+	// parameter reaches 100 (-> 1.0f), so hold the loop gain just below unity.
+	const float loopGain = Math::Clamp(feedback, 0.0f, 0.999f);
+	const float wet = Math::Clamp(mix, 0.0f, 1.0f);
+
 	for (uint32 i = 0; i < numSamples; i++)
 	{
 		if (currentSample + i < startSample)
@@ -733,25 +738,29 @@ void EchoDSP::Process(float *out, uint32 numSamples)
 			continue;
 		}
 
-		float l0 = data[m_bufferOffset + 0];
-		float l1 = data[m_bufferOffset + 1];
+		// Read the repeat before writing this frame; a zero length would
+		// otherwise read back the value written below.
+		const float delayedL = data[m_bufferOffset + 0];
+		const float delayedR = data[m_bufferOffset + 1];
 
-		if (m_numLoops > 0)
-		{
-			// Send echo to output
-			out[i * 2] = l0 * mix;
-			out[i * 2 + 1] = l1 * mix;
-		}
+		const float dryL = out[i * 2 + 0];
+		const float dryR = out[i * 2 + 1];
 
-		// Inject new sample
-		data[m_bufferOffset + 0] = out[i * 2] * feedback;
-		data[m_bufferOffset + 1] = out[i * 2 + 1] * feedback;
+		// Store what is read back one length from now: the dry input plus the
+		// decayed repeat. Previously the buffer held only the wet signal scaled
+		// by feedback, so repeats decayed by feedback * mix and lost the input.
+		data[m_bufferOffset + 0] = dryL + delayedL * loopGain;
+		data[m_bufferOffset + 1] = dryR + delayedR * loopGain;
+
+		// Output is a dry/wet blend, not a wet-only swap once the first loop
+		// has wrapped. mix = 0 is transparent, mix = 1 is fully wet.
+		out[i * 2 + 0] = Math::Lerp(dryL, delayedL, wet);
+		out[i * 2 + 1] = Math::Lerp(dryR, delayedR, wet);
 
 		m_bufferOffset += 2;
 		if (m_bufferOffset >= m_bufferLength)
 		{
 			m_bufferOffset = 0;
-			m_numLoops++;
 		}
 	}
 }
