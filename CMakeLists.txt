@@ -149,6 +149,7 @@ add_subdirectory(GUI)
 add_subdirectory(Tests)
 add_subdirectory(Tests.Shared)
 add_subdirectory(Tests.Game)
+add_subdirectory(Tests.Audio)
 
 # Enabled project filters on windows
 if(MSVC)

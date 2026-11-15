@@ -1,0 +1,3 @@
+# Compiled check binaries. Each run_*.sh rebuilds its own; none belong in the tree.
+w8_gate_clock
+w13_peaking_release
