@@ -369,7 +369,14 @@ void GameAudioEffect::SetParams(DSP *dsp, AudioPlayback &playback, HoldObjectSta
 	{
 		EchoDSP *echoDSP = (EchoDSP *)dsp;
 		if (object->effectParams[0] > 0) echoDSP->SetLength(noteDuration / object->effectParams[0]);
-		if (object->effectParams[1] >= 0) echoDSP->feedback = object->effectParams[1] / 100.0f;
+		if (object->effectParams[1] >= 0)
+		{
+			// The delay line sums the input with the decayed repeat, so a chart
+			// that asks for 100% feedback climbs toward 1/(1-feedback) instead of
+			// holding. Cap it just below unity so echo;...;100 swells over its
+			// repeats rather than running away.
+			echoDSP->feedback = Math::Min(object->effectParams[1] / 100.0f, 0.95f);
+		}
 		break;
 	}
 	case EffectType::Wobble:
