@@ -76,7 +76,7 @@ public:
 	void SetLaserEffectMix(float mix);
 	float GetLaserEffectMix() const;
 	// Independent named laser filter automation (not the normal laser filter).
-	void SetNamedLaserFilterMix(EffectType type, float mix);
+	void SetNamedLaserFilterMix(EffectType type, float mix, MapTime at = -1);
 	void RefreshNamedLaserFilter(EffectType type);
 	// KSM `trigger` switch of a named filter: bit0 = off value, bit1 = on(min), bit2 = on(max). Default off>on.
 	void SetNamedLaserFilterTrigger(EffectType type, uint8 bits);
@@ -117,6 +117,8 @@ private:
     // USC_AUDIO_PROBE_PATCH_20261110: event-log throttle, not used unless enabled.
     MapTime m_audioProbeLastLaserTime = std::numeric_limits<MapTime>::min();
     size_t m_automationCursor = 0;
+    size_t m_namedMixCursor = 0;
+    void m_ApplyNamedFilterMixEvents(MapTime time, bool resync);
     MapTime m_automationTime = std::numeric_limits<MapTime>::min();
 	// Returns the track that should have effects applied to them
 	Ref<AudioStream> m_GetDSPTrack();

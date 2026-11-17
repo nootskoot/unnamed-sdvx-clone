@@ -219,9 +219,11 @@ bool AudioPlayback::Init(class BeatmapPlayback &playback, Ref<ChartSource> chart
 }
 void AudioPlayback::Tick(float deltaTime)
 {
+    bool namedMixResync = false;
     if (m_playback && m_beatmap) {
         const auto time = m_playback->GetLastTime();
         if (time < m_lastCaptureTime) {
+            namedMixResync = true;
             m_filterCaptureTimes.clear();
             std::map<EffectType, float> mixes;
             std::map<uint16, uint8> triggers;
@@ -247,7 +249,34 @@ void AudioPlayback::Tick(float deltaTime)
         }
         m_lastCaptureTime = time;
     }
-    if (m_playback && m_beatmap && (!m_fxtrack || m_singleF)) m_UpdateAutomation(m_playback->GetLastTime());
+    if (m_playback && m_beatmap && (!m_fxtrack || m_singleF)) {
+        m_UpdateAutomation(m_playback->GetLastTime());
+        m_ApplyNamedFilterMixEvents(m_playback->GetLastTime(), namedMixResync);
+    }
+}
+// Named-filter mix events used to arrive through BeatmapPlayback::OnEventChanged, which
+// dispatches an event only when it leaves the hit window (authored time + hitWindow.good,
+// about 150 ms late). Automation (m_UpdateAutomation) runs on the playback clock, so the
+// two drifted apart: waveLength changed on time while the mix followed ~150 ms later.
+// Apply the mix events here, on the same clock and at their authored time.
+void AudioPlayback::m_ApplyNamedFilterMixEvents(MapTime time, bool resync)
+{
+    if (!m_beatmap) return;
+    const auto& objects = m_beatmap->GetObjectStates();
+    if (resync) {
+        // Tick's seek path has just replayed every event up to `time`.
+        m_namedMixCursor = 0;
+        while (m_namedMixCursor < objects.size() && objects[m_namedMixCursor]->time <= time) ++m_namedMixCursor;
+        return;
+    }
+    while (m_namedMixCursor < objects.size() && objects[m_namedMixCursor]->time <= time) {
+        const auto& o = objects[m_namedMixCursor++];
+        if (o->type != ObjectType::Event) continue;
+        const auto* e = reinterpret_cast<const EventObjectState*>(o.get());
+        if (e->key != EventKey::NamedLaserFilterMix) continue;
+        SetNamedLaserFilterMix(EffectType(uint16(e->data.uintVal >> 16)),
+            float(e->data.uintVal & 0xffff) / 1000.0f, e->time);
+    }
 }
 AudioEffect AudioPlayback::m_ResolveEffect(EffectType type, bool filter) const
 {
@@ -719,7 +748,7 @@ float AudioPlayback::GetLaserEffectMix() const
 }
 // Independent named filters are chained alongside the ordinary laser DSP.
 // Explicit mix controls audibility. Triggered retriggers retain their capture at zero mix.
-void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
+void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix, MapTime at)
 {
 	// Pre-rendered or external FX tracks must not be modified in this path.
 	if ((m_fxtrack && !m_singleF) || !m_music || !m_beatmap || !m_playback) return;
@@ -728,7 +757,7 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 	auto &state = m_namedLaserFilters[key];
     if (USC_AudioProbe() && (mix != state.mix))
         Logf("[AUDIO-PROBE] NAMED_FILTER t=%d id=%u old=%.3f new=%.3f",
-            Logger::Severity::Warning, int(m_playback->GetLastTime()), unsigned(key),
+            Logger::Severity::Warning, int(at >= 0 ? at : m_playback->GetLastTime()), unsigned(key),
             double(state.mix), double(mix));
 	state.mix = mix;
     const auto inactiveEffect = m_ResolveInactiveEffect(type);
@@ -746,7 +775,7 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix)
 	state.dsp = state.effect.CreateDSP(m_playback->GetCurrentTimingPoint(),
 		1.0f, track->GetAudioSampleRate(), GetPlaybackSpeed());
 	if (!state.dsp) return;
-	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : m_playback->GetLastTime();
+	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : (at >= 0 ? at : m_playback->GetLastTime());
 	// Named filters are held by mix and trigger state, not by a chart duration, so they
 	// carry no endTime; SetNamedLaserFilterMix(0) removes them.
 	state.dsp->chartOffset = m_beatmap->GetMapSettings().offset;

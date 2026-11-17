@@ -2449,8 +2449,8 @@ public:
 		}
 		else if (key == EventKey::NamedLaserFilterMix)
 		{
-			const EffectType type = (EffectType)(uint16)(data.uintVal >> 16);
-			m_audioPlayback.SetNamedLaserFilterMix(type, (float)(data.uintVal & 0xFFFF) / 1000.0f);
+			// Applied by AudioPlayback::Tick at the event's authored time. This callback only
+			// fires after the event leaves the hit window, ~150 ms late.
 		}
 		else if (key == EventKey::NamedLaserFilterTrigger)
 		{
