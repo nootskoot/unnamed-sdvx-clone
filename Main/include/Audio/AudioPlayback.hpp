@@ -118,7 +118,7 @@ private:
     MapTime m_audioProbeLastLaserTime = std::numeric_limits<MapTime>::min();
     size_t m_automationCursor = 0;
     size_t m_namedMixCursor = 0;
-    void m_ApplyNamedFilterMixEvents(MapTime time, bool resync);
+    void m_ApplyNamedFilterEvents(MapTime time, bool resync);
     MapTime m_automationTime = std::numeric_limits<MapTime>::min();
 	// Returns the track that should have effects applied to them
 	Ref<AudioStream> m_GetDSPTrack();

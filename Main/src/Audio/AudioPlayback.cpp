@@ -251,15 +251,15 @@ void AudioPlayback::Tick(float deltaTime)
     }
     if (m_playback && m_beatmap && (!m_fxtrack || m_singleF)) {
         m_UpdateAutomation(m_playback->GetLastTime());
-        m_ApplyNamedFilterMixEvents(m_playback->GetLastTime(), namedMixResync);
+        m_ApplyNamedFilterEvents(m_playback->GetLastTime(), namedMixResync);
     }
 }
-// Named-filter mix events used to arrive through BeatmapPlayback::OnEventChanged, which
+// Named-filter mix/trigger/refresh events used to arrive through BeatmapPlayback::OnEventChanged, which
 // dispatches an event only when it leaves the hit window (authored time + hitWindow.good,
 // about 150 ms late). Automation (m_UpdateAutomation) runs on the playback clock, so the
 // two drifted apart: waveLength changed on time while the mix followed ~150 ms later.
 // Apply the mix events here, on the same clock and at their authored time.
-void AudioPlayback::m_ApplyNamedFilterMixEvents(MapTime time, bool resync)
+void AudioPlayback::m_ApplyNamedFilterEvents(MapTime time, bool resync)
 {
     if (!m_beatmap) return;
     const auto& objects = m_beatmap->GetObjectStates();
@@ -273,9 +273,15 @@ void AudioPlayback::m_ApplyNamedFilterMixEvents(MapTime time, bool resync)
         const auto& o = objects[m_namedMixCursor++];
         if (o->type != ObjectType::Event) continue;
         const auto* e = reinterpret_cast<const EventObjectState*>(o.get());
-        if (e->key != EventKey::NamedLaserFilterMix) continue;
-        SetNamedLaserFilterMix(EffectType(uint16(e->data.uintVal >> 16)),
-            float(e->data.uintVal & 0xffff) / 1000.0f, e->time);
+        if (e->key == EventKey::NamedLaserFilterMix)
+            SetNamedLaserFilterMix(EffectType(uint16(e->data.uintVal >> 16)),
+                float(e->data.uintVal & 0xffff) / 1000.0f, e->time);
+        else if (e->key == EventKey::NamedLaserFilterTrigger)
+            SetNamedLaserFilterTrigger(EffectType(uint16(e->data.uintVal >> 16)), uint8(e->data.uintVal & 7));
+        else if (e->key == EventKey::NamedLaserFilterRefresh && e->data.uintVal)
+            // A retrigger records from its trigger onwards; refreshing ~150 ms late made it loop
+            // audio from after the authored trigger.
+            RefreshNamedLaserFilter(EffectType(uint16(e->data.uintVal)));
     }
 }
 AudioEffect AudioPlayback::m_ResolveEffect(EffectType type, bool filter) const
@@ -652,7 +658,8 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
     m_namedTriggerLaserInput = input;
     m_ApplyNamedFilterTriggers();
     if(m_laserEffect.type==EffectType::PeakingFilter && m_beatmap && m_playback &&
-       m_beatmap->GetMapSettings().peakingFilterDelay>0 && (!m_fxtrack || m_singleF)) {
+       (m_beatmap->GetMapSettings().peakingFilterDelay>0 || m_beatmap->GetMapSettings().peakingFilterChartDriven) &&
+       (!m_fxtrack || m_singleF)) {
         active=m_laserAudioSampler.Sample(double(m_playback->GetLastTime())-
             m_beatmap->GetMapSettings().peakingFilterDelay,eligibleLanes,input);
     } else if(active && m_beatmap && m_playback && m_beatmap->GetMapSettings().legacyLaserTail &&

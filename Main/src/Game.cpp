@@ -2452,14 +2452,9 @@ public:
 			// Applied by AudioPlayback::Tick at the event's authored time. This callback only
 			// fires after the event leaves the hit window, ~150 ms late.
 		}
-		else if (key == EventKey::NamedLaserFilterTrigger)
+		else if (key == EventKey::NamedLaserFilterTrigger || key == EventKey::NamedLaserFilterRefresh)
 		{
-			m_audioPlayback.SetNamedLaserFilterTrigger((EffectType)(uint16)(data.uintVal >> 16), (uint8)(data.uintVal & 7));
-		}
-		else if (key == EventKey::NamedLaserFilterRefresh)
-		{
-			if (data.uintVal)
-				m_audioPlayback.RefreshNamedLaserFilter((EffectType)(uint16)data.uintVal);
+			// Applied on time by AudioPlayback::Tick (see m_ApplyNamedFilterEvents).
 		}
 		else if (key == EventKey::LaserSlamSound)
 		{

@@ -142,8 +142,16 @@ void BeatmapPlayback::Update(MapTime newTime)
 				duration = -2;
 			}
 
+			// Events are chart-time state changes (filter type/mix, slam sound/volume, roll), not
+			// hittable objects. They used to be dispatched after the hit window, ~150 ms after their
+			// authored time, which put them out of step with automation that runs on the playback
+			// clock. ChartEnd keeps the delay so the last objects are still judged.
+			MapTime leaveDelay = hittableObjectLeave;
+			if (obj->type == ObjectType::Event && ((EventObjectState*)obj)->key != EventKey::ChartEnd)
+				leaveDelay = 0;
+
 			m_objectsByTime.Add(obj->time, (*it).get());
-			m_objectsByLeaveTime.Add(obj->time + duration + hittableObjectLeave, (*it).get());
+			m_objectsByLeaveTime.Add(obj->time + duration + leaveDelay, (*it).get());
 
 			OnObjectEntered.Call((*it).get());
 		}
