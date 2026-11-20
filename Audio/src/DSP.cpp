@@ -514,7 +514,8 @@ void RetriggerDSP::Process(float* out, uint32 numSamples)
     if (!m_audioBase || !numSamples) return;
     const double sourceRate = m_audioBase->GetSampleRate();
     const double step = sourceRate / m_sampleRate * std::max(.001f, m_audioBase->PlaybackSpeed);
-    double now = m_audioBase->GetSamplePos();
+    // Block start, not GetSamplePos(): that has already advanced past this block.
+    double now = double(m_audioBase->GetBlockStartSample());
     const double trigger = double(startTime) * sourceRate / 1000.0;
     const double origin = double(lastTimingPoint) * sourceRate / 1000.0;
     const double reset = double(m_resetDuration) * step;

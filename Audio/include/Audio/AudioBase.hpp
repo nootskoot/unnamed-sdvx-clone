@@ -42,7 +42,6 @@ public:
 	uint32 priority = 0;
 	uint32 startTime = 0;
 	uint32 endTime = 0;
-	int32 chartOffset = 0;
 	int32 lastTimingPoint = 0;
 };
 

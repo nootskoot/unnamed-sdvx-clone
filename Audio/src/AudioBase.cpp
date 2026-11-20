@@ -85,19 +85,16 @@ void AudioBase::ProcessDSPs(float *out, uint32 numSamples)
 	const double sourceStep = outputRate ? double(sampleRate) / double(outputRate) * speed : 1.0;
 	const uint64 blockEnd = blockStart + (uint64)(double(numSamples) * sourceStep + 0.5);
 
-	// startTime is chart time while blockStartSample is audio time, and the two are only
-	// equal when the player's calibration offset is 0. A hold's DSP is created on the tick
-	// that reaches its start, so its start is already behind the render cursor; a small
-	// slack keeps a non-zero calibration offset from turning the start bound into a delay,
-	// while a DSP that really is scheduled ahead stays silent until its window opens.
-	const uint64 startSlack = (uint64)sampleRate * 250 / 1000;
-
 	for (DSP *dsp : DSPs)
 	{
+		// startTime/endTime are authored map times, which are positions in the music file,
+		// the same domain as blockStartSample. No slack: a DSP created on the tick that
+		// reaches its start is already behind the render cursor, and one scheduled ahead
+		// stays silent until its window opens.
 		if (dsp->startTime)
 		{
 			const uint64 startSample = (uint64)dsp->startTime * (uint64)sampleRate / 1000;
-			if (startSample >= blockEnd + startSlack)
+			if (startSample >= blockEnd)
 				continue;
 		}
 		uint32 samples = numSamples;

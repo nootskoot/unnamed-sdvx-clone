@@ -553,7 +553,6 @@ void AudioPlayback::SetEffect(uint32 index, HoldObjectState *object, class Beatm
     const bool reservedFXBus=captureDefinition && captureDefinition->persistentFXCapture;
     dsp->startTime = !reservedFXBus && m_filterCaptureTimes.count(object->effectType)
         ? m_filterCaptureTimes.at(object->effectType) : object->time;
-	dsp->chartOffset = playback.GetBeatmap().GetMapSettings().offset;
 	dsp->lastTimingPoint = playback.GetCurrentTimingPoint().time;
 	// The hold this DSP belongs to owns its end, including when startTime was pulled
 	// back to a filter capture time.
@@ -715,7 +714,6 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
             // No endTime here on purpose: a laser filter ends when the laser input drops
             // (SetLaserFilterInput(0) cleans the DSP up), not at an authored hold end.
             m_laserDSP->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
-            m_laserDSP->chartOffset = m_beatmap->GetMapSettings().offset;
             m_ConfigureGateClock(m_laserDSP, m_laserEffect);
 			audioTrack->AddDSP(m_laserDSP);
 		}
@@ -785,7 +783,6 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix, MapTime a
 	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : (at >= 0 ? at : m_playback->GetLastTime());
 	// Named filters are held by mix and trigger state, not by a chart duration, so they
 	// carry no endTime; SetNamedLaserFilterMix(0) removes them.
-	state.dsp->chartOffset = m_beatmap->GetMapSettings().offset;
 	state.dsp->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
 	state.dsp->mix = mix;
 	m_ConfigureGateClock(state.dsp, state.effect);
@@ -1009,7 +1006,6 @@ void AudioPlayback::m_MirrorLaserDSP(DSP* original, GameAudioEffect effect, floa
     }
     mirror->startTime=original->startTime;
     mirror->endTime=original->endTime;
-    mirror->chartOffset=original->chartOffset;
     mirror->lastTimingPoint=original->lastTimingPoint;
     if (ordinary) m_SetLaserEffectParameter(input,mirror);
     else effect.UpdateDSP(mirror,m_playback->GetCurrentTimingPoint(),input,m_music->GetAudioSampleRate(),GetPlaybackSpeed());

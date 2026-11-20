@@ -137,7 +137,12 @@ uint32 AudioStreamBase::GetSampleRate() const
 void AudioStreamBase::m_restartTiming()
 {
 	m_streamTimeOffset = SamplesToSeconds(m_samplePos); // Add audio latency to this offset
-	m_samplePos = 0;
+	// Only a negative (pre-roll) position is reset. A real position stays: until the next
+	// Process() recomputes it from the decoder, zeroing it made the next block's DSP
+	// clock (blockStartSample) read 0 and GetPosition() fall back to 0 through the
+	// freeze guard in m_getPositionSeconds.
+	if (m_samplePos < 0)
+		m_samplePos = 0;
 	m_streamTimer.Restart();
 	m_offsetCorrection = 0.0f;
 	m_deltaSum = 0;
