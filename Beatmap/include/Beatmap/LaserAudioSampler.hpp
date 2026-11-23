@@ -1,6 +1,7 @@
 #pragma once
 #include "Beatmap.hpp"
 #include <algorithm>
+#include <cstdlib>
 
 // Immutable chart-position index. Judgment gating remains a current-time input.
 class LaserAudioSampler
@@ -29,6 +30,14 @@ public:
                 const double wholeNote=map.GetTimingPoint(object->time)->GetWholeNoteLength();
                 if(time.second-time.first<=wholeNote/32.0+0.5) tailStart=time.first;
             }
+            // KSON semantics (KSM v2): a slam is one graph point holding two values (v, vf) at a single pulse, so it has no
+            // duration. A slam that ends a section, including a lone slam, therefore leaves no time for the effect to run.
+            // The live path already treats single/end slams this way (Scoring::GetLaserOutputRaw skips them and
+            // IsLaserHeld is false). Slams inside a section are unchanged: the value jumps at the slam and the next
+            // segment starts from it. USC_LEGACY_END_SLAM_FILTER=1 restores the old behaviour (the effect runs for the
+            // slam's 1/32 note at its end value).
+            static const bool legacyEndSlam = []{ const char* v = std::getenv("USC_LEGACY_END_SLAM_FILTER"); return v && v[0] && v[0] != '0'; }();
+            if(!legacyEndSlam && (laser->flags & LaserObjectState::flag_Instant) && !laser->next) tailStart=time.first;
             m_lanes[laser->index].push_back({time.first,time.second,tailStart,a,b});
         }
         for(auto& lane:m_lanes) std::stable_sort(lane.begin(),lane.end(),[](const Segment&a,const Segment&b){return a.start<b.start;});

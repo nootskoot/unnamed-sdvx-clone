@@ -641,6 +641,7 @@ bool AudioPlayback::m_SkipEffectIfInputIsZero()
 }
 void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligibleLanes)
 {
+    const bool probeLiveActive = active; // what the player/scoring reported, before chart-driven gating
     if (USC_AudioProbe() && m_playback) {
         const MapTime now = m_playback->GetLastTime();
         if (m_audioProbeLastLaserTime == std::numeric_limits<MapTime>::min() ||
@@ -657,14 +658,36 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
     m_namedTriggerLaserActive = active;
     m_namedTriggerLaserInput = input;
     m_ApplyNamedFilterTriggers();
+    const char* probePath = "live";
     if(m_laserEffect.type==EffectType::PeakingFilter && m_beatmap && m_playback &&
        (m_beatmap->GetMapSettings().peakingFilterDelay>0 || m_beatmap->GetMapSettings().peakingFilterChartDriven) &&
        (!m_fxtrack || m_singleF)) {
+        probePath = "chart";
         active=m_laserAudioSampler.Sample(double(m_playback->GetLastTime())-
             m_beatmap->GetMapSettings().peakingFilterDelay,eligibleLanes,input);
     } else if(active && m_beatmap && m_playback && m_beatmap->GetMapSettings().legacyLaserTail &&
               m_laserAudioSampler.InLegacyTail(double(m_playback->GetLastTime()),eligibleLanes)) {
         active=false; // KSM v1: no laser effect on a section's short final segment (all laser effects, not only the peaking filter)
+        probePath = "legacytail";
+    }
+    if (USC_AudioProbe() && m_playback) {
+        // Transition log: the 1 Hz LASER line above is too coarse to see when the filter turns on/off.
+        static int s_lastState = -1;
+        static float s_lastInput = 0.0f;
+        const int now = int(m_playback->GetLastTime());
+        if (int(active) != s_lastState) {
+            Logf("[AUDIO-PROBE] LASER_EDGE t=%d active=%d->%d live=%d input=%.3f path=%s delay=%d chartdriven=%d eligible=%u dsp=%d",
+                Logger::Severity::Warning, now, s_lastState, int(active), int(probeLiveActive), double(input), probePath,
+                m_beatmap ? m_beatmap->GetMapSettings().peakingFilterDelay : -1,
+                m_beatmap ? int(m_beatmap->GetMapSettings().peakingFilterChartDriven) : -1,
+                eligibleLanes, int(m_laserDSP != nullptr));
+            s_lastState = int(active);
+        }
+        // A big jump in the laser value between calls is a slam.
+        if ((input > s_lastInput ? input - s_lastInput : s_lastInput - input) > 0.2f)
+            Logf("[AUDIO-PROBE] LASER_JUMP t=%d %.3f->%.3f live=%d active=%d path=%s", Logger::Severity::Warning,
+                now, double(s_lastInput), double(input), int(probeLiveActive), int(active), probePath);
+        s_lastInput = input;
     }
     auto independent=m_namedLaserFilters.find(uint16(m_laserEffectType));
     if(independent!=m_namedLaserFilters.end() && independent->second.dsp && (independent->second.mix>0 || independent->second.effect.type==EffectType::Retrigger)) {
