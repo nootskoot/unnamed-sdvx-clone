@@ -87,3 +87,6 @@ Tests.Audio/checks/render_effects_after
 
 # generated spectrograms and gain plots (regenerate with Tests.Audio/checks/run_render.sh)
 Tests.Audio/report/*.png
+bin/Tests.*
+Tests.AudioEffects/echo_wrapper/
+Tests.AudioEffects/CTestTestfile.cmake

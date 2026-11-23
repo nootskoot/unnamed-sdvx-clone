@@ -2974,7 +2974,9 @@ public:
 			if (!m_paused) m_triggerPause = false;
 		});
 		m_practiceSetupDialog->onSettingChange.AddLambda([this]() {
-			int oldAudioOffset = GetAudioOffset();
+			// m_tempOffset is edited by reference before this runs, so a snapshot taken here
+			// already contains the change. m_playback.audioOffset is what was last applied.
+			const int oldAudioOffset = m_playback.audioOffset;
 
 			m_globalOffset = g_gameConfig.GetInt(GameConfigKeys::GlobalOffset);
 			if(m_chartIndex) m_songOffset = m_chartIndex->custom_offset;

@@ -123,8 +123,8 @@ public:
 	void SetLength(double length);
 	void SetGating(float gating);
     // Native KSON gates follow the chart clock, including while bypassed.
-    void SetMeasureTimes(const std::vector<double>& times, double audioOffset = 0) {
-        m_measureTimes = times; m_clockOffset = audioOffset;
+    void SetMeasureTimes(const std::vector<double>& times) {
+        m_measureTimes = times;
     }
 
 	// Low volume
@@ -137,7 +137,6 @@ public:
 
 private:
 	std::vector<double> m_measureTimes;
-    double m_clockOffset = 0;
 	// ksmaudio GateDSP.cpp: 12-frame falling-edge release, no attack ramp.
 	static constexpr uint32 kDeclickFrames = 12;
 

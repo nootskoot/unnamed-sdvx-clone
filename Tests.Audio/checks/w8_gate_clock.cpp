@@ -233,7 +233,7 @@ int main()
 		chartClock.SetAudioBase(&baseB);
 		chartClock.SetLength(gateMs);
 		chartClock.SetGating(0.5f);
-		chartClock.SetMeasureTimes(measureTimes, 0.0);
+		chartClock.SetMeasureTimes(measureTimes);
 		chartClock.startTime = uint32(pulseMs + jitterMs);
 		baseB.blockStartSample = uint64(constructMs * baseB.rate / 1000.0);
 		const double clockWorst = measureOffset(
@@ -257,7 +257,7 @@ int main()
 		gate.SetAudioBase(&base);
 		gate.SetLength(gateMs);
 		gate.SetGating(0.5f);
-		gate.SetMeasureTimes(measureTimes, 0.0);
+		gate.SetMeasureTimes(measureTimes);
 		gate.startTime = uint32(pulseMs);
 		base.blockStartSample = uint64(pulseMs * base.rate / 1000.0);
 		const Rises r = RunGate(gate, base, pulseMs, pulseMs, pulseMs + barMs);
@@ -327,7 +327,7 @@ int main()
 		clockGate.SetAudioBase(&clockBase);
 		clockGate.SetLength(chartGateMs);
 		clockGate.SetGating(0.5f);
-		clockGate.SetMeasureTimes(measureTimes, 0.0);
+		clockGate.SetMeasureTimes(measureTimes);
 		clockGate.startTime = uint32(pulseMs + jitterMs);
 		clockBase.blockStartSample = uint64(constructMs * clockBase.rate / 1000.0);
 		const auto clockOff = offsetOf(RunGate(clockGate, clockBase, pulseMs + jitterMs, constructMs, holdEndMs));

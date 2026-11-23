@@ -14,8 +14,9 @@
 	grid, exactly as a KSON gate already does, instead of on whichever audio frame
 	happened to construct the DSP object.
 
-	Times are map times (the same units as TimingPoint::time), so the caller passes
-	the player's calibration offset to GateDSP::SetMeasureTimes separately.
+	Times are map times (the same units as TimingPoint::time), which are positions in
+	the music file. They are compared against the stream position directly; the
+	player's calibration offset is not applied.
 */
 #include <cmath>
 #include <cstddef>

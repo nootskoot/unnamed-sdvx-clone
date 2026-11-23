@@ -2,6 +2,7 @@
 #include "AudioPlayback.hpp"
 #include <Beatmap/BeatmapPlayback.hpp>
 #include <Audio/DSP.hpp>
+#include <Audio/KsmEchoDSP.hpp>
 #include <Audio/Audio.hpp>
 #include <Beatmap/KSHFilter.hpp>
 
@@ -48,7 +49,7 @@ DSP *GameAudioEffect::CreateDSP(const TimingPoint &tp, float filterInput, uint32
 	}
 	case EffectType::Echo:
 	{
-		EchoDSP *echoDSP = new EchoDSP(sampleRate);
+		KsmEchoDSP *echoDSP = new KsmEchoDSP(sampleRate);
 		echoDSP->feedback = echo.feedback.Sample(filterInput);
 		echoDSP->SetLength(actualLength);
 		ret = echoDSP;
@@ -196,7 +197,7 @@ bool GameAudioEffect::UpdateDSP(DSP* dsp, const TimingPoint &tp, float filterInp
 	}
 	case EffectType::Echo:
 	{
-		EchoDSP *echoDSP = static_cast<EchoDSP*>(dsp);
+		KsmEchoDSP *echoDSP = static_cast<KsmEchoDSP*>(dsp);
 		echoDSP->feedback = echo.feedback.Sample(filterInput);
 		echoDSP->SetLength(actualLength);
 		ret = echoDSP;
@@ -367,15 +368,13 @@ void GameAudioEffect::SetParams(DSP *dsp, AudioPlayback &playback, HoldObjectSta
 	}
 	case EffectType::Echo:
 	{
-		EchoDSP *echoDSP = (EchoDSP *)dsp;
+		KsmEchoDSP *echoDSP = (KsmEchoDSP *)dsp;
 		if (object->effectParams[0] > 0) echoDSP->SetLength(noteDuration / object->effectParams[0]);
 		if (object->effectParams[1] >= 0)
 		{
-			// The delay line sums the input with the decayed repeat, so a chart
-			// that asks for 100% feedback climbs toward 1/(1-feedback) instead of
-			// holding. Cap it just below unity so echo;...;100 swells over its
-			// repeats rather than running away.
-			echoDSP->feedback = Math::Min(object->effectParams[1] / 100.0f, 0.95f);
+			// KsmEchoDSP: feedback is the per-loop decay multiplier (ksmaudio's feedback_level),
+			// not a recirculating gain, so 100% holds the loop and needs no cap.
+			echoDSP->feedback = Math::Clamp(object->effectParams[1] / 100.0f, 0.0f, 1.0f);
 		}
 		break;
 	}

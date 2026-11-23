@@ -46,6 +46,8 @@ target_include_directories(Audio PRIVATE
 # Dependencies
 ## Local Dependencies
 target_link_libraries(Audio Shared)
+# Vendored ksmaudio effects (C++20 is private to that target; only usc/KsmEchoCore.hpp is used from here)
+target_link_libraries(Audio AudioEffects)
 
 ## 3rd Party dependencies
 ### Find dependencies roots

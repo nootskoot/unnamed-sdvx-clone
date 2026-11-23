@@ -142,6 +142,8 @@ add_subdirectory(Backbeat)
 add_subdirectory(Graphics)
 add_subdirectory(Main)
 add_subdirectory(Audio)
+add_subdirectory(Audio/Effects)
+add_subdirectory(Tests.AudioEffects)
 add_subdirectory(Beatmap)
 add_subdirectory(GUI)
 

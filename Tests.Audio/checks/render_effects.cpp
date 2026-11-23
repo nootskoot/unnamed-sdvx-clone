@@ -256,7 +256,8 @@ namespace
 #if !AUDIT_BEFORE
 			// AudioPlayback::m_ConfigureGateClock on the fixed path: KSH v1 rebuilds
 			// the measure grid from the timing map, so the gate cannot free-run.
-			gate->SetMeasureTimes(measureTimes, clockOffset);
+			(void)clockOffset; // the gate clock no longer takes a calibration offset
+			gate->SetMeasureTimes(measureTimes);
 #endif
 			nameOut = "GateDSP";
 			return gate;

@@ -5,6 +5,7 @@
 #include <Shared/ChartSource.hpp>
 #include <Audio/Audio.hpp>
 #include <Audio/DSP.hpp>
+#include <Audio/KsmEchoDSP.hpp>
 #include <Beatmap/KSHFilter.hpp>
 #include <cstdlib>  // opt-in audio comparison environment switches
 #include <Shared/Profiling.hpp>
@@ -325,7 +326,7 @@ void AudioPlayback::m_ConfigureGateClock(DSP* dsp, const AudioEffect& effect) {
     const std::vector<double>& times = kson
         ? m_beatmap->GetKSONBarTimes()
         : m_GetKshMeasureTimes();
-    static_cast<GateDSP*>(dsp)->SetMeasureTimes(times, m_playback->audioOffset);
+    static_cast<GateDSP*>(dsp)->SetMeasureTimes(times);
     if (USC_AudioProbe())
         Logf("[AUDIO-PROBE] GATE_CLOCK dsp=%s src=%s measures=%u offset=%d",
             Logger::Severity::Warning, dsp->GetName(), kson ? "kson_bars" : "timing_map",
@@ -710,7 +711,7 @@ void AudioPlayback::SetLaserFilterInput(float input, bool active, unsigned eligi
 				return;
 			}
 
-			m_laserDSP->startTime = m_filterCaptureTimes.count(m_laserEffectType) ? m_filterCaptureTimes.at(m_laserEffectType) : m_playback->GetLastTime();
+			m_laserDSP->startTime = m_filterCaptureTimes.count(m_laserEffectType) ? m_filterCaptureTimes.at(m_laserEffectType) : m_playback->GetLastTime() + m_playback->audioOffset;
             // No endTime here on purpose: a laser filter ends when the laser input drops
             // (SetLaserFilterInput(0) cleans the DSP up), not at an authored hold end.
             m_laserDSP->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
@@ -780,7 +781,7 @@ void AudioPlayback::SetNamedLaserFilterMix(EffectType type, float mix, MapTime a
 	state.dsp = state.effect.CreateDSP(m_playback->GetCurrentTimingPoint(),
 		1.0f, track->GetAudioSampleRate(), GetPlaybackSpeed());
 	if (!state.dsp) return;
-	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : (at >= 0 ? at : m_playback->GetLastTime());
+	state.dsp->startTime = m_filterCaptureTimes.count(type) ? m_filterCaptureTimes.at(type) : (at >= 0 ? at : m_playback->GetLastTime() + m_playback->audioOffset);
 	// Named filters are held by mix and trigger state, not by a chart duration, so they
 	// carry no endTime; SetNamedLaserFilterMix(0) removes them.
 	state.dsp->lastTimingPoint = m_playback->GetCurrentTimingPoint().time;
@@ -828,10 +829,11 @@ void AudioPlayback::m_ApplyButtonTrigger(uint32 lane)
 void AudioPlayback::RefreshNamedLaserFilter(EffectType type)
 {
     if (!m_playback) return;
-    m_filterCaptureTimes[type] = m_playback->GetLastTime();
+    // GetLastTime() is chart time; capture times are stream time like authored e->time.
+    m_filterCaptureTimes[type] = m_playback->GetLastTime() + m_playback->audioOffset;
     // Use the authored timestamp, not the frame on which its callback arrived.
     for (const auto& o : m_beatmap->GetObjectStates()) {
-        if (o->time > m_playback->GetLastTime()) break;
+        if (o->time > m_playback->GetLastTime() + m_playback->audioOffset) break;
         if (o->type != ObjectType::Event) continue;
         const auto* e = reinterpret_cast<const EventObjectState*>(o.get());
         if (e->key == EventKey::NamedLaserFilterRefresh && e->data.uintVal == uint32(uint16(type)))
@@ -1065,7 +1067,7 @@ void AudioPlayback::m_SetLaserEffectParameter(float input, DSP* dsp)
 	case EffectType::Echo:
 	{
 		dsp->mix = m_laserEffect.mix.Sample(input);
-		auto *echoDSP = (EchoDSP *)dsp;
+		auto *echoDSP = (KsmEchoDSP *)dsp;
 		echoDSP->feedback = m_laserEffect.echo.feedback.Sample(input);
 		break;
 	}

@@ -333,7 +333,9 @@ void GateDSP::Process(float *out, uint32 numSamples)
     const bool chartClock = !m_measureTimes.empty() && m_audioBase;
     const double sourceRate = chartClock ? m_audioBase->GetSampleRate() : m_sampleRate;
     const double speed = chartClock ? std::max(.001f, m_audioBase->PlaybackSpeed) : 1.0;
-    const double nowMs = currentSample * 1000.0 / sourceRate - m_clockOffset;
+    // Measure lines are map times, i.e. positions in the music file, and currentSample is a
+    // stream position: same domain, so no calibration offset is applied here.
+    const double nowMs = currentSample * 1000.0 / sourceRate;
     auto measure = std::upper_bound(m_measureTimes.begin(), m_measureTimes.end(), nowMs);
 	for (uint32 i = 0; i < numSamples; i++)
 	{
