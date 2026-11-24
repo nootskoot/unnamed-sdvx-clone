@@ -544,8 +544,21 @@ void RetriggerDSP::Process(float* out, uint32 numSamples)
         }
         if(m_length) {
             const size_t phase=size_t(m_captureFrames % m_length);
+            // ksmaudio LinearBuffer::read: when the gate is shorter than the loop, ramp the first and the first
+            // post-gate 12 frames so each retrigger edge fades instead of cutting (0.27 ms at 44.1 kHz).
+            constexpr size_t kDeclickFrames = 12;
+            const bool canDeclick = m_gateLength > kDeclickFrames && m_gateLength != m_length;
             for(int ch=0;ch<2;++ch) {
-                const float wet=phase<m_gateLength?m_sampleBuffer[phase*2+ch]:0.f;
+                const float sample=m_sampleBuffer[phase*2+ch];
+                float wet;
+                if(canDeclick && phase<kDeclickFrames)
+                    wet=sample*(float(phase+1)/float(kDeclickFrames+1));
+                else if(phase<m_gateLength)
+                    wet=sample;
+                else if(canDeclick && phase<m_gateLength+kDeclickFrames)
+                    wet=sample*(float(kDeclickFrames-(phase-m_gateLength))/float(kDeclickFrames+1));
+                else
+                    wet=0.f;
                 out[i*2+ch] += (wet-out[i*2+ch])*mix;
             }
         }
